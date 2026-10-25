@@ -2345,7 +2345,7 @@ dependencies = [
  "drm-ffi",
  "fastrand",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "git-version",
  "glam",
  "input",
