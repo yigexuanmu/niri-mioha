@@ -79,6 +79,12 @@ const BLOOM_SIGMA: f64 = 0.4;
 /// 光晕是屏幕空间的：半径只跟输出尺寸有关，与实际带宽无关。所以留白是「110 个
 /// 1080p 像素 × 输出倍率」，不再按带宽的倍数给。
 const BLOOM_TRAIL_HALO_PX: f64 = 110.0;
+/// 拖尾相邻段的互补斜坡宽度（1080p 参考像素 × 输出倍率）。
+///
+/// 与 `cursor_effect.frag` 的 `BLOOM_TRAIL_JOINT_PX` 必须一致：shader 拿它把
+/// 四边形里的 `along` 反算回段内坐标（`u_extent.x - 2 × 斜坡`），两边差一个像素
+/// 就会让接缝处的权重和偏离 1，拖尾上重新出现明暗条纹。
+const BLOOM_TRAIL_JOINT_PX: f64 = 22.0;
 
 /// 圆盘外晕的屏幕空间半径（1080p 参考像素），与 `cursor_effect.frag` 的
 /// `DISK_HALO_END` 保持同步。
@@ -293,6 +299,51 @@ pub fn build_commands(snapshot: &ba::Snapshot) -> Vec<DrawCommand> {
 /// 拖尾：把相邻两个拖尾点之间贴一条四边形，逐顶点插值渐变颜色与纵向覆盖。
 ///
 /// 多个点击实例同时存在时会有多条独立笔画，逐条单独铺段 —— 跨笔画接起来会画出
+/// 相邻段的夹角阈值（弧度）与单条合并段的最大长度（像素）。
+const TRAIL_MERGE_ANGLE: f64 = 1.5 * std::f64::consts::PI / 180.0;
+const TRAIL_MERGE_MAX_LENGTH: f64 = 50.0;
+
+/// 把折线点序列按「近共线」合并成若干直线段，返回 `[首点下标, 尾下标]`。
+///
+/// 合并条件：与当前段**首段方向**的夹角不超过阈值，且累计长度不超上限。
+/// 弓高上限 ≈ 50 × sin(1.5°) ≈ 1.3px，小于拖尾半宽，直线近似不漏光。
+fn merge_collinear_runs(points: &[ba::TrailPoint], distances: &[f32]) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    let mut run_dir: Option<(f64, f64)> = None;
+
+    for index in 1..points.len() {
+        let dx = (points[index].position.x - points[index - 1].position.x) as f64;
+        let dy = (points[index].position.y - points[index - 1].position.y) as f64;
+        let len = (dx * dx + dy * dy).sqrt();
+        if !len.is_finite() || len < 1e-3 {
+            continue;
+        }
+        let dir = (dx / len, dy / len);
+
+        let keep = match run_dir {
+            None => true,
+            Some((bx, by)) => {
+                let dot = (bx * dir.0 + by * dir.1).clamp(-1.0, 1.0);
+                let angle = dot.acos();
+                let projected = (distances[index] - distances[start]) as f64;
+                angle <= TRAIL_MERGE_ANGLE && projected <= TRAIL_MERGE_MAX_LENGTH
+            }
+        };
+        if keep {
+            if run_dir.is_none() {
+                run_dir = Some(dir);
+            }
+        } else {
+            runs.push((start, index - 1));
+            start = index - 1;
+            run_dir = Some(dir);
+        }
+    }
+    runs.push((start, points.len() - 1));
+    runs
+}
+
 /// 一条并不存在的连线。
 fn build_trail(snapshot: &ba::Snapshot, out: &mut Vec<DrawCommand>) {
     for (points, width) in snapshot.strokes() {
@@ -329,10 +380,23 @@ fn build_trail_stroke(
         return;
     }
 
+    // 先把相邻的近共线段并成一条直线段。
+    //
+    // 拖尾的辉光是一条 40~50px 宽的长条薄板（三段指数的主衰减只有 3.5px），
+    // 逐段铺意味着每个接缝处都张开一道楔形缺口；同时 shader 的纵向权重要在接缝
+    // 两侧留互补斜坡，斜坡一宽、段内的「平台」就被压成几像素 —— 于是雾沿笔画
+    // 方向出现一圈圈明暗条纹，实测截图里那条割裂的拖尾就是这么来的。
+    //
+    // 合并共线相邻段之后：接缝数下降一个量级，纵向平台恢复到几十像素，两个病
+    // 同时缓解。弓高由角度阈值和最大合并长共同限制（50px × 1.5° ≈ 1.3px，小于
+    // 拖尾半宽），直线近似不会从带宽里漏出去。
+    let runs = merge_collinear_runs(points, &distances);
+    let last_point = points.len() - 1;
+
     let half_width = width * 0.5;
-    for index in 1..points.len() {
-        let from = points[index - 1].position;
-        let to = points[index].position;
+    for &(start, end) in &runs {
+        let from = points[start].position;
+        let to = points[end].position;
         let (dx, dy) = (to.x - from.x, to.y - from.y);
         let length = (dx * dx + dy * dy).sqrt();
         if !length.is_finite() || length < 1e-3 {
@@ -342,20 +406,30 @@ fn build_trail_stroke(
         let normal = (-tangent.1, tangent.0);
 
         // 四个角 → 轴对齐包围盒；再向外留辉光的溢出空间。
-        let (nx, ny) = (normal.0 * half_width, normal.1 * half_width);
+        let (nx, ny) = (
+            normal.0 as f64 * half_width as f64,
+            normal.1 as f64 * half_width as f64,
+        );
         let halo_pad = BLOOM_TRAIL_HALO_PX * ref_scale as f64;
         let pad = halo_pad + QUAD_PADDING;
-        let min_x = (from.x - nx).min(to.x - nx) as f64 - pad;
-        let max_x = (from.x + nx).max(to.x + nx) as f64 + pad;
-        let min_y = (from.y - ny).min(to.y - ny) as f64 - pad;
-        let max_y = (from.y + ny).max(to.y + ny) as f64 + pad;
+        // 沿切线前后各扩展一段「互补斜坡区」。shader 的纵向权重把斜坡整段放在
+        // 这里（段内恒为 1），相邻两段在同一处一升一降、相加恒为 1 —— 四边形
+        // 不撑开的话斜坡就没有落点，雾又会被压回段内。
+        let joint_px = BLOOM_TRAIL_JOINT_PX * ref_scale as f64;
+        let (jt, jn) = (tangent.0 as f64 * joint_px, tangent.1 as f64 * joint_px);
+        let back = (from.x as f64 - jt, from.y as f64 - jn);
+        let fwd = (to.x as f64 + jt, to.y as f64 + jn);
+        let min_x = (back.0 - nx).min(fwd.0 - nx) - pad;
+        let max_x = (back.0 + nx).max(fwd.0 + nx) + pad;
+        let min_y = (back.1 - ny).min(fwd.1 - ny) - pad;
+        let max_y = (back.1 + ny).max(fwd.1 + ny) + pad;
         let quad = Rectangle::new(
             Point::from((min_x, min_y)),
             Size::from((max_x - min_x, max_y - min_y)),
         );
 
-        let from_progress = distances[index - 1] / total;
-        let to_progress = distances[index] / total;
+        let from_progress = distances[start] / total;
+        let to_progress = distances[end] / total;
         out.push(DrawCommand {
             quad,
             material: Material::Trail,
@@ -377,12 +451,12 @@ fn build_trail_stroke(
             progress: [1.0 - from_progress, -(to_progress - from_progress)],
             axis: [tangent.0, tangent.1, normal.0, normal.1],
             origin: [from.x - quad.loc.x as f32, from.y - quad.loc.y as f32],
-            extent: [length, width],
+            extent: [length + 2.0 * joint_px as f32, width],
             // 首/尾段标记：辉光在笔画两端收成圆头（见 shader 的 `u_cap`），
             // 中间的段保持硬切，相邻两段加起来才是 1。
             cap: [
-                if index == 1 { 1.0 } else { 0.0 },
-                if index + 1 == points.len() { 1.0 } else { 0.0 },
+                if start == 0 { 1.0 } else { 0.0 },
+                if end == last_point { 1.0 } else { 0.0 },
             ],
             ref_scale,
         });

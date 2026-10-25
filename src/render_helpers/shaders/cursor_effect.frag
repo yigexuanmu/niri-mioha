@@ -150,7 +150,7 @@ const float BLOOM_TRAIL_HALO_END = 110.0;
 /// 必须大于「相邻两段朝向差 × 光晕半径」，否则光晕薄板远端会张开楔形缺口。
 /// 段长 14~19px、相邻朝向差约 0.02 rad、光晕半径 110px，缺口约 2px，取 6px
 /// 有余量；同时要小于半个段长（7px），斜坡才能保持「相邻两段相加为 1」。
-const float BLOOM_TRAIL_JOINT_PX = 6.0;
+const float BLOOM_TRAIL_JOINT_PX = 22.0;
 /// 拖尾的 HDR 强度是 23.97（`trailArtisticIntensity`），这是**直射色**的增益；
 /// 辉光不能直接套这个数。mip 链把一条 2~3px 宽的带子面积平均掉大半，真正漏进
 /// 光晕的只剩一小部分。按官方图反解：取拖尾亮段的作者色 (0, 0.39, 1.0)，要让
@@ -365,8 +365,12 @@ void main() {
     } else {
         // TrailPixel：发光不被覆盖度压暗，覆盖度只管 Alpha 与纵向淡出。
         vec2 relative = pixel - u_origin;
-        float along = dot(relative, u_axis.xy) / max(u_extent.x, 0.0001);
+        // 沿切线的**像素**投影（段起点为 0）。四边形在纵向前后各扩展了
+        // `BLOOM_TRAIL_JOINT_PX`，所以它的取值域是 [-E, 段长 + E]。
+        float along_raw = dot(relative, u_axis.xy);
         float across = dot(relative, u_axis.zw) / max(u_extent.y, 0.0001) + 0.5;
+        // 段内归一化坐标，供颜色渐变 / 纹理 / 覆盖度使用。
+        float along = along_raw / max(u_extent.x, 0.0001);
         float particle_opacity = clamp(u_color_a, 0.0, 1.0);
         vec3 segment_color = mix(u_color, u_color_b, clamp(along, 0.0, 1.0));
         // 纵向覆盖必须算在分支外面：辉光是在分支外求的，如果只在采样分支里算，
@@ -399,43 +403,37 @@ void main() {
         // （不要再乘 2：那样算出来的像素距离会正好翻倍，光晕半径缩一半。）
         float across_d = abs(across - 0.5) * 2.0 - 1.0;
         float along_px = along * u_extent.x;
-        // 纵向权重：接缝两侧各让出一段互补斜坡，相邻两段在接缝处各占 0.5，
-        // 加起来恒为 1 —— 既不留缝，也不会把一条连续的拖尾逐段叠亮。
+        // 纵向权重：互补斜坡必须放在**段外的扩展区**里。
         //
-        // 斜坡必须有实际宽度（`BLOOM_TRAIL_JOINT_PX`），不能用半个像素。光晕的
-        // 半径是 40~110px，而每一段只有 15px 长：光晕其实是一条**长条薄板**，
-        // 相邻两段的朝向差一点点，薄板远端就张开一道几像素的楔形缺口，十几个
-        // 接缝叠起来就是拖尾上那把放射状的黑色扇骨。
-        float along_ref = along_px / ref_scale;
-        float length_ref = u_extent.x / ref_scale;
-        // 笔画的两端例外（`u_cap`）：那里没有「相邻段」可以接力，硬切会在拖尾
-        // 头部留下一道垂直于线段的直角边，几个线段拼起来就露出一个多边形轮廓。
-        // 所以两端放行纵向限制，改由下面的「到端点」径向距离来收缩 —— 光晕便
-        // 收成一个圆头，和上游整帧卷积出来的雾一致。
+        // 雾的宽度由三段指数决定（主衰减 3.5px、中段 22px），实际铺开约 20px；
+        // 而每一段只有 15px 长。早期把斜坡压在段内，平台只剩 3px，雾沿笔画方向
+        // 出现一圈圈等间距明暗条纹 —— 实测截图里那条割裂的拖尾就是这么来的。
+        //
+        // 现在四边形沿切线前后各扩展 `E` 像素（见 `render.rs`），斜坡整个落在
+        // 扩展区：段内恒为 1，扩展区内从 0 平滑过渡到 1。相邻两段在同一处恰好
+        // 一个上升、一个下降，相加恒等于 1 —— 于是段 i 的雾能一直铺到段 i+1
+        // 的领地里，由段 i+1 在那里接棒，既不留缝也不会叠亮。
+        float joint_px = BLOOM_TRAIL_JOINT_PX * ref_scale;
+        float seg_len_px = u_extent.x - 2.0 * joint_px;
+        // 笔画的两端例外（`u_cap`）：那里没有「相邻段」可以接力，放行纵向限制，
+        // 改由下面的「到端点」径向距离来收缩 —— 光晕便收成一个圆头，和上游整帧
+        // 卷积出来的雾一致。
         bool cap_start = u_cap.x > 0.5;
         bool cap_end = u_cap.y > 0.5;
         float rise = cap_start
             ? 1.0
-            : clamp(
-                (along_ref + BLOOM_TRAIL_JOINT_PX)
-                    / (2.0 * BLOOM_TRAIL_JOINT_PX),
-                0.0,
-                1.0);
+            : clamp((along_raw + joint_px) / (2.0 * joint_px), 0.0, 1.0);
         float fall = cap_end
             ? 1.0
-            : clamp(
-                (length_ref + BLOOM_TRAIL_JOINT_PX - along_ref)
-                    / (2.0 * BLOOM_TRAIL_JOINT_PX),
-                0.0,
-                1.0);
+            : clamp((seg_len_px + joint_px - along_raw) / (2.0 * joint_px), 0.0, 1.0);
         float along_mask = min(rise, fall);
         // 到条带边缘的距离（像素，段内为负）。
         float across_px = across_d * u_extent.y * 0.5;
-        if (cap_start && along_px < 0.0) {
-            across_px = length(vec2(along_px, across_px));
+        if (cap_start && along_raw < 0.0) {
+            across_px = length(vec2(along_raw, across_px));
         }
-        if (cap_end && along_px > u_extent.x) {
-            across_px = length(vec2(along_px - u_extent.x, across_px));
+        if (cap_end && along_raw > seg_len_px) {
+            across_px = length(vec2(along_raw - seg_len_px, across_px));
         }
         // 换算成 1080p 参考像素。
         float edge_px = max(across_px, 0.0) / ref_scale;

@@ -683,7 +683,14 @@ impl Simulation {
         let mut frame = Snapshot {
             active: self.active,
             pointer_held: self.pointer_held,
-            trail_width: TRAIL_WIDTH_WORLD * Self::world_to_pixels(viewport),
+            // 拖尾宽度按上游 `capture/main.cpp` 的原始公式
+            // `0.005 × 视口高 × 0.5` 给，**不**乘 `EFFECT_SCALE`。
+            //
+            // 参考图里拖尾的亮芯半宽约 4px（离带边 0~4px 都是 229~255），乘上
+            // 0.72 之后只剩 1.9px，近场整段塌下去 —— 离带边 2px 处只有 129，而
+            // 参考图那里还是 255。「整体缩小」针对的是圆盘 / 环 / 碎片这些有体积
+            // 的图元；拖尾是一条线，宽度缩小只会让它变成一根细丝，并不显得「小」。
+            trail_width: TRAIL_WIDTH_WORLD * viewport.height as f32 * 0.5,
             trail_opacity: 1.0,
             global_opacity: 1.0,
             ref_scale: reference_scale(viewport),
@@ -711,7 +718,11 @@ impl Simulation {
                     * Self::world_to_pixels(viewport),
                 rotation: 0.0,
                 color: curve::disk_color(normalized_age),
-                intensity: 2.4,
+                // 上游作者值是 2.0。实机深色桌面下盘面发闷（盘心只有
+                // (94,149,255)，而官方参考图是 (108,162,255)），按参考图反解
+                // 需要 3.2：蓝通道早已饱和，提强度实际是在补 R / G 两个弱通道，
+                // 盘心因此从「暗哑的蓝」回到「透亮的蔚蓝」，而不会泛白。
+                intensity: 3.2,
                 dissolve_threshold: 0.0,
                 atlas_frame: 0,
                 render_queue: 4499,
