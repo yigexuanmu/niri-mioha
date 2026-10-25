@@ -182,7 +182,9 @@ impl Shaders {
                 UniformName::new("u_axis", UniformType::_4f),
                 UniformName::new("u_origin", UniformType::_2f),
                 UniformName::new("u_extent", UniformType::_2f),
+                UniformName::new("u_cap", UniformType::_2f),
                 UniformName::new("u_bloom", UniformType::_1f),
+                UniformName::new("u_ref_scale", UniformType::_1f),
             ],
             &["tex_disk", "tex_ring", "tex_triangle", "tex_trail"],
         )

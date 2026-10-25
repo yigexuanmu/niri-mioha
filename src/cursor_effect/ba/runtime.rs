@@ -88,11 +88,19 @@ impl SimulationRuntime {
         // Unity 对「当前按住的指针」只保留一个对象，重复的 down 不能替换它，
         // 也不能重启它的粒子。
         if self.pointer_active {
+            tracing::debug!("cursor-effect: pointer_down ignored, still holding");
             return;
         }
         let instance = self.acquire_pressed_instance(time);
         instance.simulation.pointer_down(screen_position, viewport, time);
         self.pointer_active = true;
+        tracing::debug!(
+            "cursor-effect: pointer_down at {:?} viewport={:?} instances={} pooled={}",
+            screen_position,
+            viewport,
+            self.instances.len(),
+            self.unity_pool.len()
+        );
     }
 
     pub fn pointer_move(&mut self, screen_position: Point, viewport: Viewport, time: f64) {

@@ -5519,18 +5519,28 @@ impl Niri {
                     // 顺手同步视口，保证模拟与渲染用的是同一份尺寸。
                     self.cursor_effect.set_viewport(viewport);
                 }
-                _ => should_render = false,
+                _ => {
+                    tracing::debug!(
+                        "cursor-effect: no output-local pointer or geometry mismatch (pos={:?})",
+                        global_pos
+                    );
+                    should_render = false;
+                }
             }
         }
         if should_render {
-            for elem in crate::cursor_effect::render::collect_render_elements(
+            let elems = crate::cursor_effect::render::collect_render_elements(
                 renderer,
                 &self.cursor_effect,
                 Instant::now(),
                 output_scale.x as f32,
-            ) {
+            );
+            tracing::debug!("cursor-effect: pushed {} elements", elems.len());
+            for elem in elems {
                 push(elem.into());
             }
+        } else {
+            tracing::debug!("cursor-effect: skipped by visibility filter");
         }
     }
 

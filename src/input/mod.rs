@@ -3654,12 +3654,23 @@ impl State {
             let target = crate::cursor_effect::output_local_pointer(&self.niri, loc);
             let ce = &mut self.niri.cursor_effect;
             if let Some((pos, viewport)) = target {
+                tracing::debug!(
+                    "cursor-effect: button {:?}/{:?} at {:?} viewport={:?} (left={} middle={})",
+                    button,
+                    button_state,
+                    pos,
+                    viewport,
+                    is_left,
+                    is_middle
+                );
                 ce.set_viewport(viewport);
                 if ButtonState::Pressed == button_state {
                     if is_left || is_middle || button == Some(MouseButton::Right) {
                         ce.on_button_press(pos, now, is_left, is_middle);
                     }
                 }
+            } else {
+                tracing::debug!("cursor-effect: button on no output (pos={:?})", loc);
             }
             if ButtonState::Released == button_state {
                 ce.on_button_release(now);

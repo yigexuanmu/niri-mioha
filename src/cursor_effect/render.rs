@@ -572,20 +572,45 @@ pub fn collect_render_elements(
     scale: f32,
 ) -> Vec<CursorEffectElement> {
     if !state.enabled {
+        tracing::debug!("cursor-effect: disabled");
         return Vec::new();
     }
     let Some(textures) = Shaders::get(renderer).cursor_effect_textures.clone() else {
+        tracing::debug!("cursor-effect: textures not initialized");
         return Vec::new();
     };
 
     let snapshot = state.snapshot(state.viewport(), now);
     if !snapshot.has_drawable_content() {
+        tracing::debug!(
+            "cursor-effect: snapshot empty (sprites={} strokes={} viewport={:?})",
+            snapshot.sprites.len(),
+            snapshot.trail_strokes.len(),
+            state.viewport()
+        );
         return Vec::new();
     }
 
-    build_commands(&snapshot)
+    let commands = build_commands(&snapshot);
+    tracing::debug!(
+        "cursor-effect: {} commands (sprites={} strokes={} ref_scale={:.3} viewport={:?})",
+        commands.len(),
+        snapshot.sprites.len(),
+        snapshot.trail_strokes.len(),
+        snapshot.ref_scale,
+        state.viewport()
+    );
+    commands
         .iter()
         .map(|command| {
+            tracing::debug!(
+                "cursor-effect: {:?} quad=({},{} {}x{})",
+                command.material,
+                command.quad.loc.x,
+                command.quad.loc.y,
+                command.quad.size.w,
+                command.quad.size.h
+            );
             CursorEffectElement::build(command, scale, textures.get(command.material))
         })
         .collect()
