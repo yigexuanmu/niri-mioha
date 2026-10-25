@@ -1423,9 +1423,15 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.33.7"
+version = "0.33.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e762b9b188634fc508d4ec54b62ea3d352c43fd431d18d05d46f559f217f4725"
+checksum = "37bfe73dc8ec21f54d181e5a60554327ec3f1c600c455a75ccbfc65d2106a6c4"
+
+[[package]]
+name = "glam"
+version = "0.34.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
 
 [[package]]
 name = "glib"
@@ -2347,7 +2353,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "git-version",
- "glam",
+ "glam 0.34.1",
  "input",
  "insta",
  "keyframe",
@@ -3631,7 +3637,7 @@ dependencies = [
  "errno",
  "gbm",
  "gl_generator",
- "glam",
+ "glam 0.33.12",
  "indexmap",
  "input",
  "libc",
