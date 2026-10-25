@@ -1,10 +1,13 @@
 use std::cell::RefCell;
 
 use glam::Mat3;
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform, UniformName, UniformType,
-    UniformValue,
+    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
+    UniformType, UniformValue,
 };
+use smithay::backend::renderer::ImportMem;
+use smithay::utils::Size;
 
 use super::renderer::NiriRenderer;
 use super::shader_element::ShaderProgram;
@@ -18,6 +21,14 @@ pub struct Shaders {
     pub resize: Option<ShaderProgram>,
     pub gradient_fade: Option<GlesTexProgram>,
     pub blur: Option<BlurProgram>,
+    /// 光标特效 shader（字形粒子，见 `cursor_effect.frag`）。
+    ///
+    /// 与 custom_resize/close/open 不同，这个程序只由本 crate 的
+    /// `cursor_effect::render` 使用，不会被外部覆盖，因此单独存放。
+    pub cursor_effect: Option<ShaderProgram>,
+    /// 字符模式用的字形图集纹理（`cursor_effect::glyphs` 展开的 BGRA 位图）。
+    /// 所有光标特效渲染元素共享这一张纹理；为 `None` 时不绘制任何粒子。
+    pub cursor_effect_atlas: Option<GlesTexture>,
     pub custom_resize: RefCell<Option<ShaderProgram>>,
     pub custom_close: RefCell<Option<ShaderProgram>>,
     pub custom_open: RefCell<Option<ShaderProgram>>,
@@ -30,6 +41,8 @@ pub enum ProgramType {
     Resize,
     Close,
     Open,
+    /// 光标特效（字形粒子）；fragment shader 见 `shaders/cursor_effect.frag`。
+    CursorEffect,
 }
 
 impl Shaders {
@@ -148,6 +161,43 @@ impl Shaders {
             })
             .ok();
 
+        // 光标特效字形 shader。frag 里用到的每个 uniform 都必须在这里注册，
+        // 否则 smithay 绘制时查不到 location → UnknownUniform panic。
+        let cursor_effect = ShaderProgram::compile(
+            renderer,
+            include_str!("cursor_effect.frag"),
+            &[
+                UniformName::new("input_to_geo", UniformType::Matrix3x3),
+                UniformName::new("u_color", UniformType::_3f),
+                UniformName::new("u_center", UniformType::_2f),
+                UniformName::new("u_radius", UniformType::_1f),
+                UniformName::new("u_glyph", UniformType::_1f),
+                UniformName::new("u_rot", UniformType::_1f),
+            ],
+            &["cursor_glyph_atlas"],
+        )
+        .map_err(|err| {
+            warn!("error compiling cursor_effect shader: {err:?}");
+        })
+        .ok();
+
+        // 字形图集：白字黑底的 BGRA（Argb8888）位图，格间留 1px 防串字。
+        let glyphs = crate::cursor_effect::glyphs::atlas_bgra();
+        let cursor_effect_atlas = renderer
+            .import_memory(
+                &glyphs,
+                Fourcc::Argb8888,
+                Size::from((
+                    crate::cursor_effect::glyphs::ATLAS_W as i32,
+                    crate::cursor_effect::glyphs::ATLAS_H as i32,
+                )),
+                false,
+            )
+            .map_err(|err| {
+                warn!("error creating cursor_effect glyph atlas: {err:?}");
+            })
+            .ok();
+
         Self {
             border,
             shadow,
@@ -156,6 +206,8 @@ impl Shaders {
             resize,
             gradient_fade,
             blur,
+            cursor_effect,
+            cursor_effect_atlas,
             custom_resize: RefCell::new(None),
             custom_close: RefCell::new(None),
             custom_open: RefCell::new(None),
@@ -207,6 +259,7 @@ impl Shaders {
                 .or_else(|| self.resize.clone()),
             ProgramType::Close => self.custom_close.borrow().clone(),
             ProgramType::Open => self.custom_open.borrow().clone(),
+            ProgramType::CursorEffect => self.cursor_effect.clone(),
         }
     }
 }

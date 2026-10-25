@@ -422,6 +422,8 @@ pub struct Niri {
 
     pub cursor_manager: CursorManager,
     pub cursor_texture_cache: CursorTextureCache,
+    /// 光标粒子特效运行时状态（对应 `cursor-effect` 配置节）。
+    pub cursor_effect: crate::cursor_effect::CursorEffectState,
     pub cursor_shape_manager_state: CursorShapeManagerState,
     pub dnd_icon: Option<DndIcon>,
     /// Contents under pointer.
@@ -2132,6 +2134,11 @@ impl State {
             *CHILD_DISPLAY.write().unwrap() = display_name;
         }
 
+        // 重新应用光标特效配置；不动 `enabled`，它归运行时开关
+        // （ToggleCursorEffect action）管，配置值只是初始状态。
+        let cursor_effect_cfg = self.niri.config.borrow().cursor_effect.clone();
+        self.niri.apply_cursor_effect_config(&cursor_effect_cfg);
+
         // Can't really update xdg-decoration settings since we have to hide the globals for CSD
         // due to the SDL2 bug... I don't imagine clients are prepared for the xdg-decoration
         // global suddenly appearing? Either way, right now it's live-reloaded in a sense that new
@@ -3565,6 +3572,7 @@ impl Niri {
             .unwrap();
 
         let magnifier_zoom_factor = config_.magnifier.zoom_factor;
+        let cursor_effect_cfg = config_.cursor_effect.clone();
         drop(config_);
         let mut niri = Self {
             config,
@@ -3681,6 +3689,7 @@ impl Niri {
             configured_keymap: None,
             cursor_manager,
             cursor_texture_cache: Default::default(),
+            cursor_effect: Default::default(),
             cursor_shape_manager_state,
             dnd_icon: None,
             pointer_contents: PointContents::default(),
@@ -3748,6 +3757,12 @@ impl Niri {
             #[cfg(test)]
             test_action_count: 0,
         };
+
+        // 应用光标特效配置（初始值，含总开关 enabled）。
+        {
+            niri.cursor_effect.enabled = cursor_effect_cfg.enabled;
+            niri.apply_cursor_effect_config(&cursor_effect_cfg);
+        }
 
         niri.reset_pointer_inactivity_timer();
 
@@ -5470,6 +5485,46 @@ impl Niri {
                 &mut |elem| push(elem.into()),
             );
         }
+
+        // 光标特效：在光标之上绘制粒子（爆裂 / 火花 / 拖尾 / 滚轮圆环）。
+        // 环境过滤：全屏窗口下隐藏、纯桌面（无窗口）下可按配置隐藏。
+        let output_loc = output.current_location().to_f64();
+        // 抗锯齿半像素（物理像素）：软边 = 2*aa = 1px，与 Canvas2D
+        // `ctx.stroke()` 的硬件 AA 观感一致。
+        let aa = 0.5;
+        let (hide_in_fullscreen, show_on_desktop) = {
+            let ce = &self.config.borrow().cursor_effect;
+            (ce.hide_in_fullscreen, ce.show_on_desktop)
+        };
+        let global_pos = self
+            .tablet_cursor_location
+            .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
+        let focused_mapped = self.window_under(global_pos);
+        let mut should_render = self.cursor_effect.enabled;
+        if should_render {
+            if hide_in_fullscreen {
+                if let Some(mapped) = focused_mapped {
+                    if mapped.sizing_mode().is_fullscreen() {
+                        should_render = false;
+                    }
+                } else if !show_on_desktop {
+                    should_render = false;
+                }
+            } else if focused_mapped.is_none() && !show_on_desktop {
+                should_render = false;
+            }
+        }
+        if should_render {
+            for elem in crate::cursor_effect::render::collect_render_elements(
+                renderer,
+                &self.cursor_effect,
+                output_loc,
+                output_scale.x as f32,
+                aa,
+            ) {
+                push(elem.into());
+            }
+        }
     }
 
     /// Checks if the pointer should be included on a window cast or screenshot.
@@ -6593,6 +6648,10 @@ impl Niri {
             state.unfinished_animations_remain |= pointer_anim_ongoing;
             state.unfinished_animations_remain |= magnifier_anim_ongoing;
             state.unfinished_animations_remain |= magnifier_center_anim_ongoing;
+
+            // 光标特效：只要还有存活粒子就继续重绘，鼠标静止时
+            // 爆裂 / 火花 / 拖尾也需要逐帧推进。
+            state.unfinished_animations_remain |= self.cursor_effect.has_work();
 
             // Also check layer surfaces.
             if !state.unfinished_animations_remain {
@@ -9330,6 +9389,7 @@ niri_render_elements! {
         NamedPointer = MemoryRenderBufferRenderElement<R>,
         RescaledWayland = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
         RescaledNamedPointer = RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
+        CursorEffect = crate::cursor_effect::render::CursorEffectElement,
     }
 }
 

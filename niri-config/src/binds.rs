@@ -111,6 +111,8 @@ pub enum Action {
     PowerOffMonitors,
     PowerOnMonitors,
     ToggleDebugTint,
+    /// Toggle the cursor particle effect on/off.
+    ToggleCursorEffect,
     DebugToggleOpaqueRegions,
     DebugToggleDamage,
     ToggleTouchpad,
@@ -697,6 +699,7 @@ impl From<niri_ipc::Action> for Action {
             } => Self::MoveWorkspaceToMonitor(output),
             niri_ipc::Action::MoveWorkspaceToMonitorNext {} => Self::MoveWorkspaceToMonitorNext,
             niri_ipc::Action::ToggleDebugTint {} => Self::ToggleDebugTint,
+            niri_ipc::Action::ToggleCursorEffect {} => Self::ToggleCursorEffect,
             niri_ipc::Action::DebugToggleOpaqueRegions {} => Self::DebugToggleOpaqueRegions,
             niri_ipc::Action::DebugToggleDamage {} => Self::DebugToggleDamage,
             niri_ipc::Action::ToggleTouchpad {} => Self::ToggleTouchpad,

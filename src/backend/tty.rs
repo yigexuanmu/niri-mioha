@@ -7,7 +7,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{io, mem};
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -1887,6 +1887,19 @@ impl Tty {
         target_presentation_time: Duration,
     ) -> RenderResult {
         let span = tracy_client::span!("Tty::render");
+
+        // 光标特效：每个渲染帧推进一步粒子状态机。
+        // 返回 true 表示仍有存活粒子 —— 由 `has_work()` 让该 output 即便
+        // 没有其它 damage 也持续出帧（见 Niri::queue_redraw 的动画判断）。
+        let cursor_effect_alive = niri.advance_cursor_effect(Instant::now());
+        if cursor_effect_alive {
+            tracing::trace!(
+                waves = niri.cursor_effect.waves.len(),
+                sparks = niri.cursor_effect.sparks.len(),
+                trail = niri.cursor_effect.trail.len(),
+                "cursor-effect alive"
+            );
+        }
 
         let mut rv = RenderResult::Skipped;
 

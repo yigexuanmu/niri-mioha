@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::str::FromStr;
 
 use knuffel::errors::DecodeError;
 
@@ -117,6 +118,346 @@ impl MergeWith<CursorPart> for Cursor {
             } else {
                 self.shake_to_enlarge = Some(ShakeToEnlarge::from_part(x));
             }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 光标特效配置（Cursor Effects）
+//
+// 参照 BASpark ConfigManager.cs:65-90 的字段与默认值，1:1 翻译为 niri 配置项。
+// 此节点在 config.kdl 里写作 `cursor-effect { ... }`。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 粒子颜色，BASpark 风格的逗号分隔 RGB 字符串（如 `"45,175,255"`）。
+/// 亦接受 CSS 颜色（`#2dafff`、`rgb(45, 175, 255)` 等）。仿 appearance::Color
+/// 手写 knuffel::Decode，取首个字符串实参走 FromStr。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParticleColor(pub [u8; 3]);
+
+impl Default for ParticleColor {
+    fn default() -> Self {
+        // BASpark 默认 ParticleColor = "45,175,255"
+        Self([45, 175, 255])
+    }
+}
+
+impl std::str::FromStr for ParticleColor {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        // BASpark 风格：三个以逗号分隔的 0-255 整数（含 `rgb(...)`)。
+        let cleaned: &str = s
+            .trim_start_matches("rgb(")
+            .trim_start_matches("rgba(")
+            .trim_end_matches(')');
+        let parts: Vec<&str> = cleaned.split(',').map(|p| p.trim()).collect();
+        if parts.len() == 3 {
+            let parse = |x: &str| -> Result<u8, String> {
+                x.parse::<u8>()
+                    .map_err(|_| format!("invalid color component `{x}`"))
+            };
+            return Ok(Self([parse(parts[0])?, parse(parts[1])?, parse(parts[2])?]));
+        }
+        // 回退：CSS 颜色解析。
+        let c = csscolorparser::parse(s).map_err(|e| format!("invalid color `{s}`: {e}"))?;
+        let c = c.clamp();
+        Ok(Self([
+            (c.r * 255.0).round() as u8,
+            (c.g * 255.0).round() as u8,
+            (c.b * 255.0).round() as u8,
+        ]))
+    }
+}
+
+impl<S> knuffel::Decode<S> for ParticleColor
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, knuffel::errors::DecodeError<S>> {
+        if let Some(type_name) = &node.type_name {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+        let mut iter_args = node.arguments.iter();
+        let val = iter_args.next().ok_or_else(|| {
+            knuffel::errors::DecodeError::missing(node, "a color string argument is required")
+        })?;
+        if let Some(typ) = &val.type_name {
+            ctx.emit_error(knuffel::errors::DecodeError::TypeName {
+                span: typ.span().clone(),
+                found: Some((**typ).clone()),
+                expected: knuffel::errors::ExpectedType::no_type(),
+                rust_type: "str",
+            });
+        }
+        let rv = match *val.literal {
+            knuffel::ast::Literal::String(ref s) => ParticleColor::from_str(s)
+                .map_err(|e| knuffel::errors::DecodeError::conversion(&val.literal, e)),
+            _ => Err(knuffel::errors::DecodeError::unexpected(
+                &val.literal,
+                "argument",
+                "expected a string color argument",
+            )),
+        }?;
+        if let Some(val) = iter_args.next() {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                &val.literal,
+                "argument",
+                "only one color argument expected",
+            ));
+        }
+        for child in node.children() {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                child,
+                "node",
+                "no child nodes expected for a color argument",
+            ));
+        }
+        for name in node.properties.keys() {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                name,
+                "property",
+                "no properties expected for a color argument",
+            ));
+        }
+        Ok(rv)
+    }
+}
+
+impl From<ParticleColor> for Color {
+    fn from(c: ParticleColor) -> Self {
+        Color::from_rgba8_unpremul(c.0[0], c.0[1], c.0[2], 255)
+    }
+}
+
+/// BASpark ClickTriggerType：左键/右键/二者皆触发。
+///
+/// 配置写作 `click-trigger "left"` / `"right"` / `"both"`，
+/// 亦接受数字 `"0"`/`"1"`/`"2"`（字符串形）。与 `ParticleColor` 同采
+/// 手写 knuffel::Decode（取首个字符串实参走 FromStr）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClickTriggerType {
+    #[default]
+    Left,
+    Right,
+    Both,
+}
+
+impl std::str::FromStr for ClickTriggerType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "left" | "Left" | "LEFT" | "0" => Ok(Self::Left),
+            "right" | "Right" | "RIGHT" | "1" => Ok(Self::Right),
+            "both" | "Both" | "BOTH" | "2" => Ok(Self::Both),
+            other => Err(format!(
+                "invalid click-trigger `{other}`: expected left/right/both or 0/1/2"
+            )),
+        }
+    }
+}
+
+impl<S> knuffel::Decode<S> for ClickTriggerType
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, knuffel::errors::DecodeError<S>> {
+        if let Some(type_name) = &node.type_name {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+        let mut iter_args = node.arguments.iter();
+        let val = iter_args.next().ok_or_else(|| {
+            knuffel::errors::DecodeError::missing(node, "a click-trigger argument is required")
+        })?;
+        if let Some(typ) = &val.type_name {
+            ctx.emit_error(knuffel::errors::DecodeError::TypeName {
+                span: typ.span().clone(),
+                found: Some((**typ).clone()),
+                expected: knuffel::errors::ExpectedType::no_type(),
+                rust_type: "str",
+            });
+        }
+        let rv = match *val.literal {
+            knuffel::ast::Literal::String(ref s) => ClickTriggerType::from_str(s)
+                .map_err(|e| knuffel::errors::DecodeError::conversion(&val.literal, e)),
+            _ => Err(knuffel::errors::DecodeError::unexpected(
+                &val.literal,
+                "argument",
+                "expected a string click-trigger argument",
+            )),
+        }?;
+        if let Some(val) = iter_args.next() {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                &val.literal,
+                "argument",
+                "only one click-trigger argument expected",
+            ));
+        }
+        for child in node.children() {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                child,
+                "node",
+                "no child nodes expected for a click-trigger argument",
+            ));
+        }
+        for name in node.properties.keys() {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                name,
+                "property",
+                "no properties expected for a click-trigger argument",
+            ));
+        }
+        Ok(rv)
+    }
+}
+
+/// 光标特效配置。字段名与默认值对应 BASpark ConfigManager.cs:65-90。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CursorEffect {
+    /// IsEffectEnabled（总开关，默认 true）。写 `enabled false` 关闭。
+    pub enabled: bool,
+    /// EffectScale（默认 1.5）。
+    pub scale: f64,
+    /// EffectOpacity（默认 1.0）。
+    pub opacity: f64,
+    /// ParticleColor（默认 "45,175,255"）。
+    pub color: ParticleColor,
+    /// UseLinkedAnimationSpeed（默认 true：trail/click 都跟随 effect_speed）。
+    pub use_linked_animation_speed: bool,
+    /// EffectSpeed（默认 1.0，动画速度基准）。
+    pub effect_speed: f64,
+    /// TrailAnimationSpeed（默认 1.0，use_linked 时被忽略）。
+    pub trail_speed: f64,
+    /// ClickAnimationSpeed（默认 1.0，use_linked 时被忽略）。
+    pub click_speed: f64,
+    /// TrailRefreshRate（默认 40，拖尾采样 Hz）。
+    pub trail_refresh_rate: u32,
+    /// EnableAlwaysTrailEffect（默认 false：仅按下时拖尾）。
+    pub enable_always_trail: bool,
+    /// ApplyCurveDraw（默认 false）。
+    pub apply_curve_draw: bool,
+    /// EnableMiddleClickTrigger（默认 false）。
+    pub enable_middle_click_trigger: bool,
+    /// ClickTriggerType（默认 Left）。
+    pub click_trigger: ClickTriggerType,
+    /// HideInFullscreen（默认 true：全屏下单屏隐藏）。
+    pub hide_in_fullscreen: bool,
+    /// ShowEffectOnDesktop（默认 true：桌面单屏显示）。
+    pub show_on_desktop: bool,
+    /// IsTouchscreenMode（默认 false）。
+    pub touch_mode: bool,
+}
+
+impl Default for CursorEffect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            scale: 1.5,
+            opacity: 1.0,
+            color: ParticleColor::default(),
+            use_linked_animation_speed: true,
+            effect_speed: 1.0,
+            trail_speed: 1.0,
+            click_speed: 1.0,
+            trail_refresh_rate: 40,
+            enable_always_trail: false,
+            apply_curve_draw: false,
+            enable_middle_click_trigger: true,
+            click_trigger: ClickTriggerType::Left,
+            hide_in_fullscreen: true,
+            show_on_desktop: true,
+            touch_mode: false,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Clone, PartialEq)]
+pub struct CursorEffectPart {
+    /// `enabled`（裸值=true 开启）或 `enabled false`（关闭）。
+    #[knuffel(child)]
+    pub enabled: Option<Flag>,
+    /// `color "45,175,255"` 或 `color "#2dafff"`。
+    #[knuffel(child)]
+    pub color: Option<ParticleColor>,
+    /// `use-linked-animation-speed false` 关闭链式速度。
+    #[knuffel(child)]
+    pub use_linked_animation_speed: Option<Flag>,
+    #[knuffel(child)]
+    pub enable_always_trail: Option<Flag>,
+    #[knuffel(child)]
+    pub apply_curve_draw: Option<Flag>,
+    #[knuffel(child)]
+    pub enable_middle_click_trigger: Option<Flag>,
+    #[knuffel(child)]
+    pub hide_in_fullscreen: Option<Flag>,
+    #[knuffel(child)]
+    pub show_on_desktop: Option<Flag>,
+    #[knuffel(child)]
+    pub touch_mode: Option<Flag>,
+    #[knuffel(child, unwrap(argument))]
+    pub scale: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub opacity: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub effect_speed: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub trail_speed: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub click_speed: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub trail_refresh_rate: Option<u32>,
+    /// `click-trigger "left"` / `"right"` / `"both"`（或 `"0"`/`"1"`/`"2"`，字符串形）。
+    #[knuffel(child)]
+    pub click_trigger: Option<ClickTriggerType>,
+}
+
+impl MergeWith<CursorEffectPart> for CursorEffect {
+    fn merge_with(&mut self, part: &CursorEffectPart) {
+        merge!((self, part), enabled);
+        merge!(
+            (self, part),
+            use_linked_animation_speed,
+            enable_always_trail,
+            apply_curve_draw,
+            enable_middle_click_trigger,
+            hide_in_fullscreen,
+            show_on_desktop,
+            touch_mode
+        );
+        // f64 ← Option<FloatOrInt<_>>（MergeWith<FloatOrInt> for f64 存在）。
+        merge!(
+            (self, part),
+            scale,
+            opacity,
+            effect_speed,
+            trail_speed,
+            click_speed
+        );
+        // u32 ← Option<u32> / copy types，直接覆盖。
+        if let Some(x) = &part.trail_refresh_rate {
+            self.trail_refresh_rate = *x;
+        }
+        if let Some(x) = &part.color {
+            self.color = *x;
+        }
+        if let Some(x) = &part.click_trigger {
+            self.click_trigger = *x;
         }
     }
 }
