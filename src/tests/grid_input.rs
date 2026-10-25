@@ -46,15 +46,22 @@ struct SetUp {
 
 // A tiled window and a floating ignore-grid-overview window, with the grid open.
 fn set_up() -> SetUp {
-    let config = Config::parse_mem(
+    set_up_with("")
+}
+
+/// Same as [`set_up`], but appends `extra` to the config (e.g. a `binds` section).
+fn set_up_with(extra: &str) -> SetUp {
+    let config = Config::parse_mem(&format!(
         r##"
-        window-rule {
+        window-rule {{
             match title="ignored"
             open-floating true
             ignore-grid-overview true
-        }
+        }}
+
+        {extra}
         "##,
-    )
+    ))
     .unwrap();
     let mut f = Fixture::with_config(config);
     f.add_output(1, (1920, 1080));
@@ -390,7 +397,15 @@ fn mod_right_drag_on_grid_cell_doesnt_resize() {
 
 #[test]
 fn mod_tap_dismissing_exit_dialog_doesnt_toggle_grid() {
-    let SetUp { mut f, id, .. } = set_up();
+    // The Mod tap is an ordinary binding in this fork, so it has to be configured; the default
+    // config ships exactly this line.
+    let SetUp { mut f, id, .. } = set_up_with(
+        r#"
+        binds {
+            Mod repeat=false { toggle-grid-overview; }
+        }
+        "#,
+    );
     assert!(f.niri().layout.close_grid_overview());
     assert!(f.niri().exit_confirm_dialog.show());
 
@@ -404,6 +419,16 @@ fn mod_tap_dismissing_exit_dialog_doesnt_toggle_grid() {
     // Later taps work as usual.
     tap_key(&mut f, id, "LWIN");
     assert!(f.niri().layout.is_grid_overview_open());
+}
+
+#[test]
+fn mod_tap_does_nothing_without_a_bind() {
+    // Nothing is hardwired anymore: without the binding above, tapping Mod is a no-op.
+    let SetUp { mut f, id, .. } = set_up();
+    assert!(f.niri().layout.close_grid_overview());
+
+    tap_key(&mut f, id, "LWIN");
+    assert!(!f.niri().layout.is_grid_overview_open());
 }
 
 #[test]

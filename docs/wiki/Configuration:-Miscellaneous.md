@@ -261,6 +261,53 @@ animations {
 > [!NOTE]
 > The shake gesture needs the cursor to move across a certain distance. Slow, precise movements will not trigger it. Adjust `threshold` if you find it too hard or too easy to trigger (lower values make it easier).
 
+### `cursor-effect`
+
+<sup>Since: 26.04 (fork)</sup>
+
+Cursor particle effects: click bursts, a trail while dragging, and rings on scroll. The compositor
+draws them itself with GLES as code glyphs, so no external program is needed.
+
+Every setting is optional; the defaults are shown below.
+
+```kdl
+cursor-effect {
+    enabled true
+    scale 1.5
+    opacity 1.0
+    color "45,175,255"
+    use-linked-animation-speed true
+    effect-speed 1.0
+    trail-speed 1.0
+    click-speed 1.0
+    trail-refresh-rate 40
+    enable-always-trail false
+    apply-curve-draw false
+    click-trigger "left"
+    enable-middle-click-trigger true
+    hide-in-fullscreen true
+    show-on-desktop true
+    touch-mode false
+}
+```
+
+- `enabled` — master switch; the `toggle-cursor-effect` action flips it at runtime without editing the config.
+- `scale`, `opacity` — size and transparency of the whole effect.
+- `color` — burst color for the left button, either `"R,G,B"` or a CSS color such as `"#2dafff"`.
+  The right button uses a light red and the middle button a light yellow.
+- `use-linked-animation-speed` — when `true` (the default), the trail and the click burst both follow
+  `effect-speed`; set it to `false` to use `trail-speed` and `click-speed` separately.
+- `trail-refresh-rate` — trail sampling rate in Hz.
+- `enable-always-trail` — draw a trail even while no button is held.
+- `click-trigger` — which buttons produce a burst: `"left"`, `"right"`, or `"both"`.
+- `enable-middle-click-trigger` — whether the middle button produces a burst (and a trail while held).
+- `hide-in-fullscreen` — hide the effect while the pointer is over a fullscreen window.
+- `show-on-desktop` — show the effect on a workspace with no windows.
+- `touch-mode` — touchscreen-oriented sizing.
+
+To toggle it from a key binding, see the `toggle-cursor-effect` action in
+[Key Bindings](./Configuration:-Key-Bindings.md).
+
 ### `overview`
 
 <sup>Since: 25.05</sup>

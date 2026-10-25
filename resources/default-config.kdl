@@ -295,6 +295,37 @@ hotkey-overlay {
     // skip-at-startup
 }
 
+// Cursor particle effects (this fork only).
+// Particles are drawn by the compositor itself as code glyphs; no external
+// program is involved. Every setting below is optional and shows its default.
+// cursor-effect {
+//     // Master switch. Also toggled at runtime by the `toggle-cursor-effect` action.
+//     enabled true
+//     // Effect scale and overall opacity.
+//     scale 1.5
+//     opacity 1.0
+//     // Click burst color: "R,G,B" or a CSS color like "#2dafff".
+//     color "45,175,255"
+//     // Animation speed. With use-linked-animation-speed (default), trail and
+//     // click both follow effect-speed; otherwise trail-speed/click-speed apply.
+//     use-linked-animation-speed true
+//     effect-speed 1.0
+//     trail-speed 1.0
+//     click-speed 1.0
+//     // Trail sampling rate in Hz.
+//     trail-refresh-rate 40
+//     // Draw a trail even when no button is held.
+//     enable-always-trail false
+//     apply-curve-draw false
+//     // Which buttons trigger a burst: "left", "right" or "both".
+//     click-trigger "left"
+//     enable-middle-click-trigger true
+//     // Hide the effect over fullscreen windows, or on a workspace with no windows.
+//     hide-in-fullscreen true
+//     show-on-desktop true
+//     touch-mode false
+// }
+
 // Uncomment this line to ask the clients to omit their client-side decorations if possible.
 // If the client will specifically ask for CSD, the request will be honored.
 // Additionally, clients will be informed that they are tiled, removing some client-side rounded corners.

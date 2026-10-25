@@ -466,6 +466,19 @@ binds {
 }
 ```
 
+<sup>Since: 26.04 (fork)</sup>
+
+The default config binds tapping the `Mod` key alone to this action:
+
+```kdl
+binds {
+    Mod repeat=false { toggle-grid-overview; }
+}
+```
+
+Since that is an ordinary binding, you can rebind it to any key, or delete it to remove
+the `Mod`-tap shortcut entirely.
+
 #### `toggle-magnifier`
 
 Toggle the screen magnifier on or off. When toggled on, the screen zooms in centered on the cursor. The zoom factor is configured via [`magnifier.zoom-factor`](./Configuration:-Miscellaneous.md#zoom-factor) (defaults to `2.0`). Toggling off smoothly animates back to normal.
@@ -473,6 +486,20 @@ Toggle the screen magnifier on or off. When toggled on, the screen zooms in cent
 ```kdl
 binds {
     Mod+Shift+Z { toggle-magnifier; }
+}
+```
+
+#### `toggle-cursor-effect`
+
+<sup>Since: 26.04 (fork)</sup>
+
+Toggle the [cursor particle effect](./Configuration:-Miscellaneous.md#cursor-effect) on or off without
+editing the config. Turning it off clears any particles still on screen. The initial state comes from
+`cursor-effect { enabled ... }`.
+
+```kdl
+binds {
+    Mod+M hotkey-overlay-title="Toggle cursor effect" repeat=false { toggle-cursor-effect; }
 }
 ```
 
