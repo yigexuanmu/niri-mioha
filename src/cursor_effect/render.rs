@@ -5,8 +5,8 @@
 //! 1. [`build_commands`]：把一帧 `Snapshot` 翻成纯数据（[`DrawCommand`]）——四边
 //!    形的屏幕矩形、材质种类、该材质需要的全部参数。不含任何 GL 对象，因此可以
 //!    离线跑（单元测试、以及和上游 C++ 参考实现比对）。
-//! 2. [`collect_render_elements`]：把 `DrawCommand` 包成 `ShaderRenderElement`
-//!    （与 `BorderRenderElement` 同模板），绑定 uniform 与纹理。
+//! 2. [`collect_render_elements`]：把 `DrawCommand` 包成 `ShaderRenderElement` （与
+//!    `BorderRenderElement` 同模板），绑定 uniform 与纹理。
 //!
 //! 四类材质与上游 `fxMaterialsShaderSource` 一一对应：
 //!
@@ -374,10 +374,7 @@ fn build_trail_stroke(
                 ba::trail::trail_longitudinal_coverage(to_progress),
             ],
             // 上游 uv.x = 1 - progress，沿段线性推进。
-            progress: [
-                1.0 - from_progress,
-                -(to_progress - from_progress),
-            ],
+            progress: [1.0 - from_progress, -(to_progress - from_progress)],
             axis: [tangent.0, tangent.1, normal.0, normal.1],
             origin: [from.x - quad.loc.x as f32, from.y - quad.loc.y as f32],
             extent: [length, width],
@@ -446,11 +443,7 @@ pub struct CursorEffectElement {
 impl CursorEffectElement {
     /// 组装一个轴对齐四边形并绑定 uniform / 纹理。`scale` 用来把物理像素换算回
     /// 逻辑坐标（smithay 的元素尺寸是逻辑像素）。
-    fn build(
-        command: &DrawCommand,
-        scale: f32,
-        texture: &GlesTexture,
-    ) -> Self {
+    fn build(command: &DrawCommand, scale: f32, texture: &GlesTexture) -> Self {
         let inverse = 1.0 / scale.max(f32::EPSILON) as f64;
         let loc = Point::<f64, Logical>::from((
             command.quad.loc.x * inverse,
@@ -466,8 +459,10 @@ impl CursorEffectElement {
             };
         }
 
-        let input_to_geo =
-            Mat3::from_scale(Vec2::new(command.quad.size.w as f32, command.quad.size.h as f32));
+        let input_to_geo = Mat3::from_scale(Vec2::new(
+            command.quad.size.w as f32,
+            command.quad.size.h as f32,
+        ));
         let uniforms: Rc<[Uniform<'static>]> = Rc::from(vec![
             mat3_uniform("input_to_geo", input_to_geo).into_owned(),
             Uniform::new("u_mode", command.material as u32 as f32),
@@ -491,10 +486,8 @@ impl CursorEffectElement {
             Uniform::new("u_ref_scale", command.ref_scale),
         ]);
 
-        let textures = HashMap::from([(
-            command.material.texture_name().to_string(),
-            texture.clone(),
-        )]);
+        let textures =
+            HashMap::from([(command.material.texture_name().to_string(), texture.clone())]);
         let mut inner = ShaderRenderElement::empty(ProgramType::CursorEffect, Kind::Unspecified);
         inner.update(size, None, scale, 1.0, uniforms, textures);
         inner = inner.with_location(loc);
@@ -679,7 +672,10 @@ mod tests {
             .expect("圆环");
         assert!(disk < ring, "圆盘先于圆环绘制");
         // 三角形（队列 4550）永远在圆盘/圆环（4499）之后。
-        if let Some(triangle) = commands.iter().position(|c| c.material == Material::Triangle) {
+        if let Some(triangle) = commands
+            .iter()
+            .position(|c| c.material == Material::Triangle)
+        {
             assert!(triangle > ring);
         }
     }
@@ -704,8 +700,8 @@ mod tests {
             &base,
         );
         // 45° 旋转后包围盒边长 = 40 * (sin + cos) * 辉光放大倍数 + 2 * padding。
-        let expected = 40.0 * std::f32::consts::SQRT_2 as f64 * BLOOM_QUAD_SCALE
-            + QUAD_PADDING * 2.0;
+        let expected =
+            40.0 * std::f32::consts::SQRT_2 as f64 * BLOOM_QUAD_SCALE + QUAD_PADDING * 2.0;
         assert!((command.quad.size.w - expected).abs() < 1e-3);
         assert!((command.quad.loc.x - (100.0 - expected * 0.5)).abs() < 1e-3);
         // 图集第二帧：u 起点 0.5、跨度 0.5。
@@ -748,9 +744,8 @@ mod tests {
                 &base,
             );
             // 半个四边形 = 盘半尺寸 × 放大倍数 + padding + 屏幕空间留白。
-            let need = size as f64 * 0.5 * BLOOM_QUAD_SCALE
-                + QUAD_PADDING
-                + DISK_HALO_PX * scale as f64;
+            let need =
+                size as f64 * 0.5 * BLOOM_QUAD_SCALE + QUAD_PADDING + DISK_HALO_PX * scale as f64;
             assert!(
                 (command.quad.size.w * 0.5 - need).abs() < 1e-3,
                 "高度 {height}：圆盘四边形 {:.1} 装不下 {need:.1} 的光晕留白",

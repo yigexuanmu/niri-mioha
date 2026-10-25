@@ -212,7 +212,11 @@ struct Random {
 impl Random {
     fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed },
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
         }
     }
 
@@ -415,21 +419,22 @@ impl Simulation {
         self.click_particle_settings = normalize_click_particle_settings(settings);
     }
 
-    pub fn set_click_particle_settings_at(
-        &mut self,
-        settings: ClickParticleSettings,
-        time: f64,
-    ) {
+    pub fn set_click_particle_settings_at(&mut self, settings: ClickParticleSettings, time: f64) {
         let normalized = normalize_click_particle_settings(settings);
         let motion_changed = normalized.rings_lifetime_ms
             != self.click_particle_settings.rings_lifetime_ms
             || normalized.rings_angular_velocity_multiplier
-                != self.click_particle_settings.rings_angular_velocity_multiplier
+                != self
+                    .click_particle_settings
+                    .rings_angular_velocity_multiplier
             || normalized.rings_rotation_direction
                 != self.click_particle_settings.rings_rotation_direction;
         if motion_changed && self.active && self.click_effect_enabled && !self.rings.is_empty() {
             self.accumulate_click_time(time);
-            let age = self.particle_step_states_at(time).dissolve_rings.particle_age_seconds;
+            let age = self
+                .particle_step_states_at(time)
+                .dissolve_rings
+                .particle_age_seconds;
             self.settle_ring_rotation(age);
         }
         self.click_particle_settings = normalized;
@@ -554,7 +559,10 @@ impl Simulation {
             });
         }
 
-        let click_triangle_age = self.particle_step_states.click_triangles.particle_age_seconds;
+        let click_triangle_age = self
+            .particle_step_states
+            .click_triangles
+            .particle_age_seconds;
         let click_triangles_emitted = self.particle_step_states.click_triangles.burst_emitted;
         let trail_time = self.trail_time;
         self.triangles.retain(|particle| {
@@ -816,9 +824,7 @@ impl Simulation {
             }
         }
 
-        frame
-            .sprites
-            .sort_by_key(|sprite| sprite.render_queue);
+        frame.sprites.sort_by_key(|sprite| sprite.render_queue);
         frame
     }
 
@@ -948,10 +954,8 @@ impl Simulation {
         let mut states = self.particle_step_states;
         let mut elapsed = self.pending_click_time;
         if time > self.click_time_source_at {
-            elapsed += Self::scaled_duration(
-                time - self.click_time_source_at,
-                self.click_time_scale,
-            );
+            elapsed +=
+                Self::scaled_duration(time - self.click_time_source_at, self.click_time_scale);
         }
         if self.click_effect_enabled && elapsed > 0.0 {
             advance_click_particle_step_states(&mut states, elapsed);
@@ -1019,8 +1023,7 @@ impl Simulation {
         for particle in &mut self.triangles {
             if !particle.drag_particle {
                 particle.origin_world = particle.origin_world.add(offset);
-                particle.global_scale_pivot_world =
-                    particle.global_scale_pivot_world.add(offset);
+                particle.global_scale_pivot_world = particle.global_scale_pivot_world.add(offset);
             }
         }
 
@@ -1045,10 +1048,10 @@ impl Simulation {
             let radial = direction(angle);
             let origin = self.effect_origin_world;
             let velocity = radial.mul(self.random.range(speed_minimum_world, speed_maximum_world));
-            let lifetime = ms_to_seconds(
-                self.random
-                    .range(settings.click_lifetime_min_ms, settings.click_lifetime_max_ms),
-            );
+            let lifetime = ms_to_seconds(self.random.range(
+                settings.click_lifetime_min_ms,
+                settings.click_lifetime_max_ms,
+            ));
             let size = self.random.range(size_minimum_world, size_maximum_world);
             let atlas_frame = if self.atlas_random.unit() < 0.5 { 0 } else { 1 };
             self.triangles.push(MovingParticle {
@@ -1185,8 +1188,8 @@ impl Simulation {
             consumed += distance_until_emission;
             let interpolation = consumed / segment_length;
             let position = from.add(segment.mul(interpolation));
-            let trail_time = from_trail_time
-                + (to_trail_time - from_trail_time) * interpolation as f64;
+            let trail_time =
+                from_trail_time + (to_trail_time - from_trail_time) * interpolation as f64;
             self.emit_drag_triangle(position, trail_time);
             self.last_emission_world = position;
             self.drag_distance_remainder_world = 0.0;
@@ -1230,9 +1233,7 @@ pub fn apply_global_scale(snapshot: &mut Snapshot, scale: f32) {
         sprite.size *= safe_scale;
         if sprite.scale_center_with_global_scale {
             let offset = sprite.center.sub(sprite.global_scale_pivot);
-            sprite.center = sprite
-                .global_scale_pivot
-                .add(offset.mul(safe_scale));
+            sprite.center = sprite.global_scale_pivot.add(offset.mul(safe_scale));
         }
     }
     snapshot.trail_width *= safe_scale;
@@ -1287,7 +1288,11 @@ mod tests {
             sim.advance(t);
         }
         let snapshot = sim.snapshot(viewport, t);
-        assert!(snapshot.trail.len() > 2, "拖尾点太少: {}", snapshot.trail.len());
+        assert!(
+            snapshot.trail.len() > 2,
+            "拖尾点太少: {}",
+            snapshot.trail.len()
+        );
 
         sim.pointer_up(t);
         // 松手后 1 秒内仍在活动状态

@@ -92,7 +92,9 @@ impl SimulationRuntime {
             return;
         }
         let instance = self.acquire_pressed_instance(time);
-        instance.simulation.pointer_down(screen_position, viewport, time);
+        instance
+            .simulation
+            .pointer_down(screen_position, viewport, time);
         self.pointer_active = true;
         tracing::debug!(
             "cursor-effect: pointer_down at {:?} viewport={:?} instances={} pooled={}",
@@ -106,7 +108,9 @@ impl SimulationRuntime {
     pub fn pointer_move(&mut self, screen_position: Point, viewport: Viewport, time: f64) {
         if self.pointer_active {
             if let Some(instance) = self.instances.last_mut() {
-                instance.simulation.pointer_move(screen_position, viewport, time);
+                instance
+                    .simulation
+                    .pointer_move(screen_position, viewport, time);
             }
             return;
         }
@@ -212,7 +216,9 @@ impl SimulationRuntime {
 
     pub fn update_unity_trail_time_scale(&mut self, time_scale: f32) {
         for instance in &mut self.instances {
-            instance.simulation.update_unity_trail_time_scale(time_scale);
+            instance
+                .simulation
+                .update_unity_trail_time_scale(time_scale);
         }
         if let Some(ambient) = self.always_on_trail.as_mut() {
             ambient.update_unity_trail_time_scale(time_scale);
@@ -312,9 +318,7 @@ impl SimulationRuntime {
         combined.active |= current.active;
         combined.pointer_held |= current.pointer_held;
         combined.sprites.append(&mut current.sprites);
-        combined
-            .trail_strokes
-            .append(&mut current.trail_strokes);
+        combined.trail_strokes.append(&mut current.trail_strokes);
         if current.trail_strokes.is_empty() && current.trail.len() >= 2 {
             combined.trail_strokes.push(TrailStroke {
                 points: current.trail,
@@ -357,8 +361,10 @@ impl SimulationRuntime {
     }
 
     fn next_ambient_seed(&mut self) -> u64 {
-        let seed = (self.base_seed ^ AMBIENT_RANDOM_STREAM)
-            .wrapping_add(self.ambient_activation_count.wrapping_mul(RANDOM_STREAM_STEP));
+        let seed = (self.base_seed ^ AMBIENT_RANDOM_STREAM).wrapping_add(
+            self.ambient_activation_count
+                .wrapping_mul(RANDOM_STREAM_STEP),
+        );
         self.ambient_activation_count += 1;
         seed
     }

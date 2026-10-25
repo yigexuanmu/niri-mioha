@@ -2,8 +2,8 @@ use std::cell::RefCell;
 
 use glam::Mat3;
 use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform, UniformName,
-    UniformType, UniformValue,
+    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform, UniformName, UniformType,
+    UniformValue,
 };
 
 use super::renderer::NiriRenderer;

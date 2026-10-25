@@ -3052,7 +3052,8 @@ impl State {
         // 快速移动时的拖尾变成断续直线。
         {
             let now = Instant::now();
-            if let Some((pos, viewport)) = crate::cursor_effect::output_local_pointer(&self.niri, new_pos)
+            if let Some((pos, viewport)) =
+                crate::cursor_effect::output_local_pointer(&self.niri, new_pos)
             {
                 let ce = &mut self.niri.cursor_effect;
                 ce.set_viewport(viewport);
@@ -3179,7 +3180,9 @@ impl State {
         // 光标特效：把指针移动喂给拖尾（内部按 ≥5.4px 的步长抽点）。
         {
             let now = Instant::now();
-            if let Some((fx, viewport)) = crate::cursor_effect::output_local_pointer(&self.niri, pos) {
+            if let Some((fx, viewport)) =
+                crate::cursor_effect::output_local_pointer(&self.niri, pos)
+            {
                 let ce = &mut self.niri.cursor_effect;
                 ce.set_viewport(viewport);
                 ce.on_move(fx, now);

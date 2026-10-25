@@ -309,8 +309,14 @@ pub fn triangle_color(normalized_age: f32) -> Color {
     const KEYS: [ColorKey; 5] = [
         ColorKey::new(0.182_360_57, Color::new(1.0, 1.0, 1.0, 1.0)),
         ColorKey::new(0.282_352_94, Color::new(0.372_641_5, 0.773_187_3, 1.0, 1.0)),
-        ColorKey::new(0.461_768_52, Color::new(0.372_549_03, 0.772_549_1, 1.0, 1.0)),
-        ColorKey::new(0.661_768_52, Color::new(0.352_941_2, 0.729_411_8, 0.945_098_1, 1.0)),
+        ColorKey::new(
+            0.461_768_52,
+            Color::new(0.372_549_03, 0.772_549_1, 1.0, 1.0),
+        ),
+        ColorKey::new(
+            0.661_768_52,
+            Color::new(0.352_941_2, 0.729_411_8, 0.945_098_1, 1.0),
+        ),
         ColorKey::new(0.826_474_4, Color::new(0.372_549_03, 0.772_549_1, 1.0, 1.0)),
     ];
     let lifetime = evaluate_color_gradient(&KEYS, normalized_age);
@@ -590,7 +596,10 @@ mod tests {
             let t = (index as f64 + 0.5) / steps as f64;
             numeric += evaluate_hermite(&keys, t as f32) as f64 / steps as f64;
         }
-        assert!((analytic as f64 - numeric).abs() < 1e-3, "{analytic} vs {numeric}");
+        assert!(
+            (analytic as f64 - numeric).abs() < 1e-3,
+            "{analytic} vs {numeric}"
+        );
     }
 
     #[test]

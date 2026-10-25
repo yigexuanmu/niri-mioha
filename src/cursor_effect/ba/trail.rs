@@ -185,7 +185,8 @@ pub fn make_unity_trail_mesh(points: &[Point], width: f32) -> Vec<TrailVertex> {
         }
 
         let turn_angle = turn.atan2(direction_dot);
-        let outer_start_angle = (previous.normal.y * outer_sign).atan2(previous.normal.x * outer_sign);
+        let outer_start_angle =
+            (previous.normal.y * outer_sign).atan2(previous.normal.x * outer_sign);
         let mut join = Join {
             inner,
             inner_transverse: if inner_sign > 0.0 { 1.0 } else { 0.0 },
@@ -215,9 +216,7 @@ pub fn make_unity_trail_mesh(points: &[Point], width: f32) -> Vec<TrailVertex> {
         joins[point_index] = Some(join);
     }
 
-    mesh.reserve(
-        (points.len() - 1) * 6 + points.len() * 5 * 3 + 6,
-    );
+    mesh.reserve((points.len() - 1) * 6 + points.len() * 5 * 3 + 6);
     for index in 1..segments.len() {
         let segment = segments[index];
         if !segment.valid {
@@ -331,8 +330,12 @@ mod tests {
         // 1 段 × 2 三角 + 首尾 2 个帽子三角 = 4 个三角
         assert_eq!(mesh.len(), 12);
         // 起点帽子在左侧，终点帽子在右侧
-        assert!(mesh.iter().any(|v| (v.x + 1.0).abs() < 1e-4 && v.progress == 0.0));
-        assert!(mesh.iter().any(|v| (v.x - 11.0).abs() < 1e-4 && v.progress == 1.0));
+        assert!(mesh
+            .iter()
+            .any(|v| (v.x + 1.0).abs() < 1e-4 && v.progress == 0.0));
+        assert!(mesh
+            .iter()
+            .any(|v| (v.x - 11.0).abs() < 1e-4 && v.progress == 1.0));
     }
 
     #[test]

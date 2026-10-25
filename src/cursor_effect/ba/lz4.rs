@@ -76,8 +76,14 @@ mod tests {
         // 四张纹理的解码长度来自上游 `generated_packed_fx_texture_data.inc`。
         let cases: [(&[u8], usize); 4] = [
             (include_bytes!("../ba_data/center_disk.lz4"), 512 * 512 * 4),
-            (include_bytes!("../ba_data/dissolve_ring.lz4"), 256 * 128 * 4),
-            (include_bytes!("../ba_data/triangle_atlas.lz4"), 256 * 128 * 4),
+            (
+                include_bytes!("../ba_data/dissolve_ring.lz4"),
+                256 * 128 * 4,
+            ),
+            (
+                include_bytes!("../ba_data/triangle_atlas.lz4"),
+                256 * 128 * 4,
+            ),
             (include_bytes!("../ba_data/trail.lz4"), 512 * 512 * 4),
         ];
         for (packed, size) in cases {

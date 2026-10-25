@@ -30,7 +30,10 @@ pub fn dissolve_ring() -> &'static FxTexture {
     CELL.get_or_init(|| FxTexture {
         width: 256,
         height: 128,
-        rgba: decompress_block(include_bytes!("../ba_data/dissolve_ring.lz4"), 256 * 128 * 4),
+        rgba: decompress_block(
+            include_bytes!("../ba_data/dissolve_ring.lz4"),
+            256 * 128 * 4,
+        ),
     })
 }
 
@@ -40,7 +43,10 @@ pub fn triangle_atlas() -> &'static FxTexture {
     CELL.get_or_init(|| FxTexture {
         width: 256,
         height: 128,
-        rgba: decompress_block(include_bytes!("../ba_data/triangle_atlas.lz4"), 256 * 128 * 4),
+        rgba: decompress_block(
+            include_bytes!("../ba_data/triangle_atlas.lz4"),
+            256 * 128 * 4,
+        ),
     })
 }
 

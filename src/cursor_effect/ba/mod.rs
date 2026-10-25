@@ -19,13 +19,12 @@ pub mod sim;
 pub mod textures;
 pub mod trail;
 
+use curve::{ClickParticleSettings, ShardParticleSettings};
 pub use runtime::SimulationRuntime;
 pub use sim::{
     apply_global_scale, reference_scale, LayerVisibility, Point, Simulation, Snapshot, Sprite,
     SpriteKind, TrailPoint, TrailStroke, Viewport,
 };
-
-use curve::{ClickParticleSettings, ShardParticleSettings};
 
 /// 参考实现里 `frame_visual_config.cpp` 的产品级视觉参数（默认即恒等配置）。
 #[derive(Debug, Clone, Copy)]
@@ -124,7 +123,11 @@ mod tests {
         let mut time = 0.016;
         for _ in 0..6 {
             time += 0.016;
-            sim.pointer_move(Point::new(400.0 + time as f32 * 200.0, 300.0), viewport, time);
+            sim.pointer_move(
+                Point::new(400.0 + time as f32 * 200.0, 300.0),
+                viewport,
+                time,
+            );
             sim.advance(time);
         }
         let base = sim.snapshot(viewport, time);

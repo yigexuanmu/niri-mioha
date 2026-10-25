@@ -90,11 +90,15 @@ impl CursorEffectState {
         self.trail_time_scale = settings.trail_time_scale;
 
         let now = self.time(Instant::now());
-        self.runtime.set_click_particle_settings(self.click_particle);
-        self.runtime.set_shard_particle_settings(self.shard_particle);
+        self.runtime
+            .set_click_particle_settings(self.click_particle);
+        self.runtime
+            .set_shard_particle_settings(self.shard_particle);
         self.runtime.set_trail_length_multiplier(self.trail_length);
-        self.runtime.set_click_time_scale(self.click_time_scale, now);
-        self.runtime.set_trail_time_scale(self.trail_time_scale, now);
+        self.runtime
+            .set_click_time_scale(self.click_time_scale, now);
+        self.runtime
+            .set_trail_time_scale(self.trail_time_scale, now);
         self.runtime
             .update_unity_trail_time_scale(self.trail_time_scale);
         // 常驻拖尾换到独立实例，配置变化要立刻同步过去。
@@ -150,7 +154,8 @@ impl CursorEffectState {
         let viewport = self.viewport.get();
         // 按下时喂当前实例；没按下时（常驻拖尾）由运行时自己维护一个只带拖尾的
         // 实例，上游 `SimulationRuntime::pointerMove` 同构。
-        self.runtime.set_always_on_trail_enabled(self.persistent_trail, time);
+        self.runtime
+            .set_always_on_trail_enabled(self.persistent_trail, time);
         self.runtime.pointer_move(pos, viewport, time);
     }
 
