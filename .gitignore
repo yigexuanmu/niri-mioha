@@ -4,5 +4,9 @@
 /packaging/arch/src
 /packaging/arch/*.pkg.tar.*
 
+# Local cargo cache used for in-tree builds
+/.cargo-home
+/.target
+
 .idea
 *.pending-snap

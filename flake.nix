@@ -111,6 +111,10 @@
             # These tests require the ability to access a "valid EGL Display", but that won't work
             # inside the Nix sandbox
             "--skip=::egl"
+            # Upstream animation tests that build a real EGL renderer through
+            # `add_renderer()` but whose names don't contain "egl", so the filter
+            # above doesn't catch them. They fail in the sandbox for the same reason.
+            "--skip=::closing_window"
           ];
 
           postInstall =
