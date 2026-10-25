@@ -87,6 +87,31 @@ const float RING_UV_SPAN = 0.999;
 /// —— 否则光晕会浮在实体外面一圈，盘和雾之间空出一道暗环。
 const float DISK_SHAPE_RADIUS = 0.879;
 
+/// 圆盘外晕的径向衰减（1080p 参考像素，从**盘边**起算）。
+///
+/// 上游是整帧 mip 链 bloom：远场的衰减长度会随尺度递增，单条指数撑不出「近处
+/// 紧、远处铺一片淡蓝」的形状，所以和拖尾一样用多段叠加。
+///
+/// 参数按 `docs/images/native-click-trail.png` 的盘外径向剖面拟合（先扣掉纯黑
+/// 背景、再转到线性域）。**拟合区间从亮环外侧开始**：官方图在离盘边 0~6px 处
+/// 那圈近白的 (226,239,255) 是两道溶解环本体，不是圆盘的辉光。早先把这段也算
+/// 进圆盘，反解出一个 4px 的「白热核心」，结果盘边糊成一圈厚厚的白环 ——
+/// 而真正的环反倒被盖住了。
+const float DISK_HALO_NEAR_LEN = 12.0;
+const float DISK_HALO_FAR_LEN = 33.0;
+/// 两段的增益。口径是 `glow_shape`：`bloom_linear` 还要再乘
+/// `glow_source * u_bloom`，而圆盘固定是 `u_intensity = 2.4`、`u_bloom = 0.25`，
+/// 所以 0.6 × 增益 = 剖面里的线性蓝通道。
+const float DISK_HALO_NEAR_GAIN = 0.250;
+const float DISK_HALO_FAR_GAIN = 0.215;
+/// 远场在四边形内部平滑归零（1080p 参考像素）。`render.rs` 的 `DISK_HALO_PX`
+/// 必须与它一致，否则光晕会被四边形切出一道直边。
+const float DISK_HALO_END = 160.0;
+/// 盘内的辉光折扣。盘面本身已经是饱和的实心蓝，辉光再按峰值叠上去会把盘心抬成
+/// 浅白蓝；官方图里盘心始终是 (108,162,255)。只在靠近盘边的十几像素内让辉光
+/// 接上来，盘心保持原来的亮度。
+const float DISK_HALO_INSIDE_SCALE = 0.03;
+
 /// 上游 `ResolveRecordingCompatibleDesktopTransport` 的预设参数：源覆盖 Alpha
 /// 上限 0.90（给「网页透明叠加」预留背景透视），亮核补偿强度 0.35。
 ///
@@ -103,25 +128,29 @@ const float AA_HALF_WIDTH = 0.5;
 /// 溶解阈值的软化半宽（Alpha 单位）。只影响阈值处的过渡，溶解形状基本不变。
 const float DISSOLVE_SOFTNESS = 0.02;
 
+/// 环的辉光相对本体的比例。环本体已经按顶点色实心画（见 `DissolvePixel` 分支），
+/// 但上游整帧 bloom 里这条 2~3px 的细线被摊薄得厉害，真正漏进雾里的只是一小截。
+const float RING_GLOW_SCALE = 0.10;
+
 /// 辉光扩散半径（单位：图元半尺寸）。圆盘 / 环 / 碎片用这一套。
 const float BLOOM_SIGMA = 0.4;
-/// 拖尾光晕的三段指数衰减长度（1080p 参考像素）。
-///
-/// 上游 `unity_bloom.cpp` 的 mip 链把一条只有 2~3px 宽的 HDR 带子抹成一大片
-/// 蓝雾：近场 3~4px 内陡降，中程二十几像素，远场一直拖到 100px 才见底。三段
-/// 指数叠起来才贴合官方图（`docs/images/native-click-trail.png`）的横向扫描
-/// 实测剖面 —— 单段高斯要么太窄（没有雾），要么太宽（变成一团糊）。
-///
-/// 注意单位是**像素**而不是半带宽：bloom 是屏幕空间后处理，半径只跟图像尺寸
-/// 有关。按半带宽归一化会让光晕缩成几像素 —— 那正是「拖尾没有辉光」的成因。
+/// 拖尾外晕采用近、中、远三段指数衰减（1080p 参考像素），从条带边缘起算。
+/// 单高斯会在近处形成一根等亮的粗管子，同时又丢失远处的淡蓝雾；三段曲线
+/// 是按上游 `docs/images/native-click-trail.png` 的完整横向剖面拟合的。
 const float BLOOM_TRAIL_FALLOFF_NEAR = 3.5;
 const float BLOOM_TRAIL_FALLOFF_MID = 22.0;
 const float BLOOM_TRAIL_FALLOFF_FAR = 90.0;
 const float BLOOM_TRAIL_NEAR_WEIGHT = 0.769;
 const float BLOOM_TRAIL_MID_WEIGHT = 0.225;
 const float BLOOM_TRAIL_FAR_WEIGHT = 0.006;
-/// 光晕的平滑截断位置（参考像素）。四边形留白按这个值算。
+/// 远场在四边形内部平滑归零，避免矩形留白边缘出现硬切。
 const float BLOOM_TRAIL_HALO_END = 110.0;
+/// 拖尾接缝的纵向互补斜坡半宽（1080p 参考像素）。
+///
+/// 必须大于「相邻两段朝向差 × 光晕半径」，否则光晕薄板远端会张开楔形缺口。
+/// 段长 14~19px、相邻朝向差约 0.02 rad、光晕半径 110px，缺口约 2px，取 6px
+/// 有余量；同时要小于半个段长（7px），斜坡才能保持「相邻两段相加为 1」。
+const float BLOOM_TRAIL_JOINT_PX = 6.0;
 /// 拖尾的 HDR 强度是 23.97（`trailArtisticIntensity`），这是**直射色**的增益；
 /// 辉光不能直接套这个数。mip 链把一条 2~3px 宽的带子面积平均掉大半，真正漏进
 /// 光晕的只剩一小部分。按官方图反解：取拖尾亮段的作者色 (0, 0.39, 1.0)，要让
@@ -213,6 +242,8 @@ vec2 ring_uv(vec2 pixel, float radius) {
 void main() {
     vec2 pixel = (input_to_geo * vec3(niri_v_coords, 1.0)).xy;
     float global_opacity = clamp(u_gop, 0.0, 1.0);
+    // 物理像素 → 1080p 参考像素。辉光是屏幕空间量，各分支都要用。
+    float ref_scale = max(u_ref_scale, 0.0001);
 
     vec3 emission = vec3(0.0);
     float coverage = 0.0;
@@ -235,21 +266,32 @@ void main() {
             * global_opacity;
         coverage = clamp(shape * u_color_a, 0.0, 1.0) * global_opacity;
 
-        float radius = length(pixel - u_center) / max(u_size * 0.5, 0.0001);
-        // 圆盘的光晕要比盘面本身白得多：参考图里盘心是饱和蓝 (110,165,255)，
-        // 外围一圈雾却是近白的淡蓝。上游的 bloom 是整帧后处理，盘心那点白色
-        // 高光被 mip 链摊到四周，所以雾偏白；直接拿 `u_color`（饱和蓝）当光源，
-        // 叠出来就是发紫的一圈，颜色一眼就不对。
-        glow_source = mix(u_color, vec3(1.0), 0.62) * u_intensity;
-        // 盘内不加辉光：盘面本身已经是不透明的饱和蓝，再叠一层线性域的亮光会
-        // 直接把它抬成浅白蓝（参考图里盘心始终是 (110,165,255)，没有泛白）。
-        // 雾只从盘边开始向外扩散，正好对上参考图「实心蓝盘 + 白色外晕」的样子。
-        float outside_disk = smoothstep(
-            DISK_SHAPE_RADIUS - 0.015,
-            DISK_SHAPE_RADIUS + 0.015,
-            radius);
-        glow_shape =
-            blurred_inside(radius - DISK_SHAPE_RADIUS, BLOOM_SIGMA) * outside_disk;
+        float half_px = max(u_size * 0.5, 0.0001);
+        float radius = length(pixel - u_center) / half_px;
+        // 辉光的光源色用**编码域**的蓝，不是线性域的蓝。
+        //
+        // 上游 bloom 的 mip 链是在已经做过 `LinearToSrgb` 的帧上做的卷积。官方图
+        // 盘外远场反解出来的线性通道比例是 (0.24, 0.39, 1.0) —— 正好是作者蓝
+        // (0.2406, 0.3906, 1.0) 的 sRGB 值，而不是它的线性值 (0.048, 0.127, 1.0)。
+        // 拿线性色当光源，外晕会缺红缺绿、偏成青色 —— 这就是「圆盘颜色不对、
+        // 整体发青」的来源。
+        vec3 disk_azure = linear_to_srgb(u_color);
+        // 到盘边的距离（1080p 参考像素，盘内为负）。
+        float disk_edge_px =
+            (length(pixel - u_center) - DISK_SHAPE_RADIUS * half_px) / ref_scale;
+        float disk_out = max(disk_edge_px, 0.0);
+        glow_source = disk_azure * u_intensity;
+        float disk_halo = DISK_HALO_NEAR_GAIN * exp(-disk_out / DISK_HALO_NEAR_LEN)
+            + DISK_HALO_FAR_GAIN * exp(-disk_out / DISK_HALO_FAR_LEN);
+        disk_halo *= 1.0 - smoothstep(
+            DISK_HALO_END * 0.8,
+            DISK_HALO_END,
+            disk_out);
+        disk_halo *= mix(
+            DISK_HALO_INSIDE_SCALE,
+            1.0,
+            smoothstep(-12.0, 0.0, disk_edge_px));
+        glow_shape = disk_halo;
     } else if (u_mode < 1.5) {
         // DissolvePixel：只保留 alpha 高于阈值的部分。
         float radius = length(pixel - u_center);
@@ -267,9 +309,17 @@ void main() {
             u_threshold - DISSOLVE_SOFTNESS,
             u_threshold + DISSOLVE_SOFTNESS,
             material_alpha);
-        float material_coverage = material_alpha * dissolve * ring_coverage;
+        // 纹理 alpha 只当**裁剪阈值**用，真正的不透明度来自顶点色 alpha。
+        //
+        // `dissolve-ring` 的 alpha 是一圈 0.03~1.0 的角度渐变（用来做「擦出」
+        // 的溶解前沿），把它直接乘进覆盖度，等于给整道环打了 12% 的不透明度；
+        // 再被容量压缩按 alpha 归一，环最亮也到不了 30/255 —— 参考图里那两道
+        // 干净的近白亮环就是这么丢的。上游 `DissolvePixel` 的语义是
+        // `clip(alpha - threshold)`，裁剪之后按顶点色实心画。
+        float ring_opacity = u_color_a * dissolve;
+        float material_coverage = ring_opacity * ring_coverage;
         // 辉光的可见度只跟「这道环整体还剩多少」有关，不含几何环带因子。
-        element_opacity = material_alpha > 0.0 ? material_alpha * dissolve : 0.0;
+        element_opacity = ring_opacity;
         emission = srgb_to_linear(texel.rgb)
             * u_color
             * u_intensity
@@ -279,7 +329,10 @@ void main() {
 
         float outer_d = (radius - outer) / max(outer, 0.0001);
         float inner_d = (radius - inner) / max(outer, 0.0001);
-        glow_source = u_color * u_intensity;
+        // 环的辉光要单独压。环本体修好之后 `element_opacity` 从 0.12 变成 1.0，
+        // 辉光跟着放大八倍，会在圆盘外糊出一大片灰白的雾 —— 参考图里两道环之外
+        // 几乎立刻回到深色，雾是圆盘自己的事。
+        glow_source = u_color * u_intensity * RING_GLOW_SCALE;
         // 环带只有 6% 宽度，摊薄后天然比圆盘暗得多，和官方图一致。
         glow_shape = blurred_inside(outer_d, BLOOM_SIGMA)
             - blurred_inside(inner_d, BLOOM_SIGMA);
@@ -346,18 +399,35 @@ void main() {
         // （不要再乘 2：那样算出来的像素距离会正好翻倍，光晕半径缩一半。）
         float across_d = abs(across - 0.5) * 2.0 - 1.0;
         float along_px = along * u_extent.x;
-        // 纵向权重。段内部恒为 1；接缝处两侧各占半个像素，加起来正好是 1，
-        // 所以一条连续的拖尾不会被逐段叠亮。超出本段范围即 0 —— 每个像素只会
-        // 被「它所在那一段」的光晕覆盖。
+        // 纵向权重：接缝两侧各让出一段互补斜坡，相邻两段在接缝处各占 0.5，
+        // 加起来恒为 1 —— 既不留缝，也不会把一条连续的拖尾逐段叠亮。
         //
+        // 斜坡必须有实际宽度（`BLOOM_TRAIL_JOINT_PX`），不能用半个像素。光晕的
+        // 半径是 40~110px，而每一段只有 15px 长：光晕其实是一条**长条薄板**，
+        // 相邻两段的朝向差一点点，薄板远端就张开一道几像素的楔形缺口，十几个
+        // 接缝叠起来就是拖尾上那把放射状的黑色扇骨。
+        float along_ref = along_px / ref_scale;
+        float length_ref = u_extent.x / ref_scale;
         // 笔画的两端例外（`u_cap`）：那里没有「相邻段」可以接力，硬切会在拖尾
         // 头部留下一道垂直于线段的直角边，几个线段拼起来就露出一个多边形轮廓。
         // 所以两端放行纵向限制，改由下面的「到端点」径向距离来收缩 —— 光晕便
         // 收成一个圆头，和上游整帧卷积出来的雾一致。
         bool cap_start = u_cap.x > 0.5;
         bool cap_end = u_cap.y > 0.5;
-        float rise = cap_start ? 1.0 : clamp(along_px + 0.5, 0.0, 1.0);
-        float fall = cap_end ? 1.0 : clamp(u_extent.x + 0.5 - along_px, 0.0, 1.0);
+        float rise = cap_start
+            ? 1.0
+            : clamp(
+                (along_ref + BLOOM_TRAIL_JOINT_PX)
+                    / (2.0 * BLOOM_TRAIL_JOINT_PX),
+                0.0,
+                1.0);
+        float fall = cap_end
+            ? 1.0
+            : clamp(
+                (length_ref + BLOOM_TRAIL_JOINT_PX - along_ref)
+                    / (2.0 * BLOOM_TRAIL_JOINT_PX),
+                0.0,
+                1.0);
         float along_mask = min(rise, fall);
         // 到条带边缘的距离（像素，段内为负）。
         float across_px = across_d * u_extent.y * 0.5;
@@ -368,7 +438,6 @@ void main() {
             across_px = length(vec2(along_px - u_extent.x, across_px));
         }
         // 换算成 1080p 参考像素。
-        float ref_scale = max(u_ref_scale, 0.0001);
         float edge_px = max(across_px, 0.0) / ref_scale;
         float halo = BLOOM_TRAIL_NEAR_WEIGHT * exp(-edge_px / BLOOM_TRAIL_FALLOFF_NEAR)
             + BLOOM_TRAIL_MID_WEIGHT * exp(-edge_px / BLOOM_TRAIL_FALLOFF_MID)
@@ -378,6 +447,9 @@ void main() {
             BLOOM_TRAIL_HALO_END * 0.8,
             BLOOM_TRAIL_HALO_END,
             edge_px);
+        // 光晕沿用当前拖尾段的颜色，不在暗尾段额外混入白色；否则即使作者色
+        // 已衰减到黑，白色光源仍会把尾巴画成一块灰雾。最终亮核的弱通道提升
+        // 由下方统一的 SDR 合成完成。
         glow_source = segment_color * u_intensity * BLOOM_TRAIL_SOURCE_SCALE;
         glow_shape = along_mask * halo;
     }
@@ -427,7 +499,8 @@ void main() {
         max(premultiplied.g, premultiplied.b));
     float energy_ratio = premultiplied_peak / max(alpha, 0.000001);
     float gate = smoothstep(0.25, 0.75, energy_ratio)
-        * smoothstep(0.03125, 0.25, premultiplied_peak);
+        * smoothstep(0.03125, 0.25, premultiplied_peak)
+        * smoothstep(0.05, 0.5, scene_coverage);
     premultiplied = mix(
         premultiplied,
         vec3(premultiplied_peak),

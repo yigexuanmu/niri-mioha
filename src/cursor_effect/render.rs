@@ -80,6 +80,15 @@ const BLOOM_SIGMA: f64 = 0.4;
 /// 1080p 像素 × 输出倍率」，不再按带宽的倍数给。
 const BLOOM_TRAIL_HALO_PX: f64 = 110.0;
 
+/// 圆盘外晕的屏幕空间半径（1080p 参考像素），与 `cursor_effect.frag` 的
+/// `DISK_HALO_END` 保持同步。
+///
+/// 圆盘是点击特效的视觉锚点：官方图里那圈蔚蓝的雾一直铺到盘边外 ~130px，靠
+/// `BLOOM_QUAD_SCALE` 那个「按图元倍数」的留白远远撑不到 —— 圆盘本身只有几十
+/// 像素，乘 2.4 还是几十像素，雾会被四边形切成一个方块。所以这里和拖尾一样按
+/// 屏幕像素给。
+const DISK_HALO_PX: f64 = 160.0;
+
 /// 辉光增益，按上游官方演示图（`docs/images/native-click-trail.png`）的径向剖面
 /// 标定：圆盘内部约 +25%，1.6 倍半径处衰减到 ~5%，与实测 (0.31,0.35,0.50) 吻合。
 const BLOOM_GAIN: f32 = 0.25;
@@ -152,6 +161,22 @@ pub struct DrawCommand {
 }
 
 impl DrawCommand {
+    /// 光晕的屏幕空间外扩（物理像素）。辉光半径只跟输出尺寸有关，跟图元大小
+    /// 无关，所以这里按 1080p 参考像素 × 输出倍率给，而不是按图元的倍数。
+    fn halo_pad(material: Material, base: &Base) -> f64 {
+        let scale = if base.ref_scale.is_finite() && base.ref_scale > 0.0 {
+            base.ref_scale as f64
+        } else {
+            1.0
+        };
+        match material {
+            Material::Disk => DISK_HALO_PX * scale,
+            // 环 / 碎片的辉光仍在图元自身的尺度上（`BLOOM_SIGMA`），而且它们
+            // 数量多、尺寸小，按屏幕像素外扩会把四边形撑得过大。
+            Material::Ring | Material::Triangle | Material::Trail => 0.0,
+        }
+    }
+
     fn sprite(
         material: Material,
         center: ba::Point,
@@ -167,7 +192,8 @@ impl DrawCommand {
         } else {
             half
         } * BLOOM_QUAD_SCALE
-            + QUAD_PADDING;
+            + QUAD_PADDING
+            + Self::halo_pad(material, base);
         let side = half * 2.0;
         let quad = Rectangle::new(
             Point::from((center.x as f64 - half, center.y as f64 - half)),
@@ -695,6 +721,63 @@ mod tests {
             BLOOM_QUAD_SCALE > halo,
             "四边形放大 {BLOOM_QUAD_SCALE} 倍，容不下 {halo} 倍半尺寸的辉光"
         );
+    }
+
+    #[test]
+    fn disk_quad_keeps_room_for_the_screen_space_halo() {
+        // 圆盘外晕同样是屏幕空间的：留白 = `DISK_HALO_PX × 输出倍率`，与盘的大小
+        // 无关。盘只有几十像素，按倍数留白会被四边形切成一个方块。
+        for height in [1080_u32, 1440, 2160] {
+            let scale = ba::reference_scale(ba::Viewport::new(1920, height));
+            let base = Base {
+                color: [1.0; 3],
+                color_a: 1.0,
+                gop: 1.0,
+                intensity: 2.4,
+                threshold: 0.0,
+                ref_scale: scale,
+            };
+            let size = 0.08 * height as f32;
+            let command = DrawCommand::sprite(
+                Material::Disk,
+                ba::Point::new(500.0, 500.0),
+                size,
+                0.0,
+                true,
+                [0.0, 1.0],
+                &base,
+            );
+            // 半个四边形 = 盘半尺寸 × 放大倍数 + padding + 屏幕空间留白。
+            let need = size as f64 * 0.5 * BLOOM_QUAD_SCALE
+                + QUAD_PADDING
+                + DISK_HALO_PX * scale as f64;
+            assert!(
+                (command.quad.size.w * 0.5 - need).abs() < 1e-3,
+                "高度 {height}：圆盘四边形 {:.1} 装不下 {need:.1} 的光晕留白",
+                command.quad.size.w * 0.5
+            );
+        }
+
+        // 其它图元不该跟着外扩：碎片数量多、尺寸小，按屏幕像素撑开会浪费填充率。
+        let base = Base {
+            color: [1.0; 3],
+            color_a: 1.0,
+            gop: 1.0,
+            intensity: 1.0,
+            threshold: 0.0,
+            ref_scale: 1.0,
+        };
+        let triangle = DrawCommand::sprite(
+            Material::Triangle,
+            ba::Point::new(100.0, 100.0),
+            40.0,
+            0.0,
+            true,
+            [0.0, 0.5],
+            &base,
+        );
+        let expected = 40.0 * BLOOM_QUAD_SCALE + QUAD_PADDING * 2.0;
+        assert!((triangle.quad.size.w - expected).abs() < 1e-3);
     }
 
     #[test]
