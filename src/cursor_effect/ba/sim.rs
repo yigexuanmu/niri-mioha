@@ -46,6 +46,17 @@ fn direction(angle: f32) -> Point {
     Point::new(angle.cos(), angle.sin())
 }
 
+/// 特效尺寸的整体比例。
+///
+/// 上游 Unity / 网页版都以 1080p 为基准：网页版的长度单位是 CSS px，不随屏幕
+/// 物理分辨率放大，所以 2560×1600 的屏幕上圆盘峰值直径仍是一百三十来像素；
+/// 而这里按 `输出高 / 2` 等比放大，1600p 下会胀到 190px 以上，观感明显偏大。
+/// 乘 0.72 后 1600p 的实际尺寸落回 1080p 基准附近，和网页版视觉一致。
+///
+/// 只作用于「世界单位 → 像素」的换算（图元大小、拖尾宽度、粒子半径），
+/// 不参与世界坐标本身的定义，所以特效位置与半径不会互相牵连。
+pub const EFFECT_SCALE: f32 = 0.72;
+
 /// 视口尺寸（物理像素）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Viewport {
@@ -692,7 +703,7 @@ impl Simulation {
                     * Self::world_to_pixels(viewport),
                 rotation: 0.0,
                 color: curve::disk_color(normalized_age),
-                intensity: 2.0,
+                intensity: 2.4,
                 dissolve_threshold: 0.0,
                 atlas_frame: 0,
                 render_queue: 4499,
@@ -897,7 +908,7 @@ impl Simulation {
     }
 
     fn world_to_pixels(viewport: Viewport) -> f32 {
-        viewport.height as f32 * 0.5
+        viewport.height as f32 * 0.5 * EFFECT_SCALE
     }
 
     fn scaled_duration(duration: f64, time_scale: f32) -> f64 {

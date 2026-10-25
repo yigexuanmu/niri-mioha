@@ -236,8 +236,20 @@ void main() {
         coverage = clamp(shape * u_color_a, 0.0, 1.0) * global_opacity;
 
         float radius = length(pixel - u_center) / max(u_size * 0.5, 0.0001);
-        glow_source = u_color * u_intensity;
-        glow_shape = blurred_inside(radius - DISK_SHAPE_RADIUS, BLOOM_SIGMA);
+        // 圆盘的光晕要比盘面本身白得多：参考图里盘心是饱和蓝 (110,165,255)，
+        // 外围一圈雾却是近白的淡蓝。上游的 bloom 是整帧后处理，盘心那点白色
+        // 高光被 mip 链摊到四周，所以雾偏白；直接拿 `u_color`（饱和蓝）当光源，
+        // 叠出来就是发紫的一圈，颜色一眼就不对。
+        glow_source = mix(u_color, vec3(1.0), 0.62) * u_intensity;
+        // 盘内不加辉光：盘面本身已经是不透明的饱和蓝，再叠一层线性域的亮光会
+        // 直接把它抬成浅白蓝（参考图里盘心始终是 (110,165,255)，没有泛白）。
+        // 雾只从盘边开始向外扩散，正好对上参考图「实心蓝盘 + 白色外晕」的样子。
+        float outside_disk = smoothstep(
+            DISK_SHAPE_RADIUS - 0.015,
+            DISK_SHAPE_RADIUS + 0.015,
+            radius);
+        glow_shape =
+            blurred_inside(radius - DISK_SHAPE_RADIUS, BLOOM_SIGMA) * outside_disk;
     } else if (u_mode < 1.5) {
         // DissolvePixel：只保留 alpha 高于阈值的部分。
         float radius = length(pixel - u_center);

@@ -276,7 +276,11 @@ pub fn disk_color(normalized_age: f32) -> Color {
     const BLUE: Color = Color::new(0.240_566_02, 0.390_618_15, 1.0, 1.0);
     let color_t = normalized_age / 0.120_592_05;
     let mut color = lerp_color(WHITE, BLUE, color_t);
-    const FADE_START: f32 = 0.108_827_344;
+    // 圆盘在参考图里要「实心」地存在大半个生命周期，最后才淡出。上游把它写在
+    // 0.109 就开始衰减，配合 250ms 寿命等于 27ms 之后盘面就半透明了 —— 桌面
+    // 背景从盘面透上来，蓝通道永远打不满，看起来就是「颜色发灰、不对」。
+    // 推到 0.78 之后，盘心在参考图对应的那几格里稳定落在 (110,165,255)。
+    const FADE_START: f32 = 0.78;
     color.a = if normalized_age <= FADE_START {
         1.0
     } else {
