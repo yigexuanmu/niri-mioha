@@ -6,7 +6,8 @@ use std::time::Instant;
 use super::ba::curve::{ClickParticleSettings, ShardParticleSettings};
 use super::ba::sim::DEFAULT_SEED;
 use super::ba::{
-    apply_visual_config, LayerVisibility, Point, Simulation, Snapshot, Viewport, VisualConfig,
+    apply_visual_config, LayerVisibility, Point, SimulationRuntime, Snapshot, Viewport,
+    VisualConfig,
 };
 
 /// 哪些按键会触发点击爆裂。
@@ -31,7 +32,7 @@ impl ClickTrigger {
 pub struct CursorEffectState {
     /// 总开关（`toggle-cursor-effect` 动作切换）。
     pub enabled: bool,
-    sim: Simulation,
+    runtime: SimulationRuntime,
     /// 模拟时间原点；所有时间戳都是相对它的秒数。
     epoch: Instant,
     /// 鼠标所在输出的物理尺寸，事件与渲染共用同一份，保证坐标自洽。
@@ -54,7 +55,7 @@ impl Default for CursorEffectState {
     fn default() -> Self {
         Self {
             enabled: true,
-            sim: Simulation::new(DEFAULT_SEED),
+            runtime: SimulationRuntime::new(DEFAULT_SEED),
             epoch: Instant::now(),
             viewport: Cell::new(Viewport::new(1920, 1080)),
             visual: VisualConfig::default(),
@@ -89,13 +90,16 @@ impl CursorEffectState {
         self.trail_time_scale = settings.trail_time_scale;
 
         let now = self.time(Instant::now());
-        self.sim.set_click_particle_settings(self.click_particle);
-        self.sim.set_shard_particle_settings(self.shard_particle);
-        self.sim.set_trail_length_multiplier(self.trail_length);
-        self.sim.set_click_time_scale(self.click_time_scale, now);
-        self.sim.set_trail_time_scale(self.trail_time_scale, now);
-        self.sim
+        self.runtime.set_click_particle_settings(self.click_particle);
+        self.runtime.set_shard_particle_settings(self.shard_particle);
+        self.runtime.set_trail_length_multiplier(self.trail_length);
+        self.runtime.set_click_time_scale(self.click_time_scale, now);
+        self.runtime.set_trail_time_scale(self.trail_time_scale, now);
+        self.runtime
             .update_unity_trail_time_scale(self.trail_time_scale);
+        // 常驻拖尾换到独立实例，配置变化要立刻同步过去。
+        self.runtime
+            .set_always_on_trail_enabled(self.persistent_trail, now);
     }
 
     /// 更新鼠标所在输出尺寸（物理像素）。渲染与事件必须用同一份。
@@ -126,7 +130,7 @@ impl CursorEffectState {
             return;
         }
         let time = self.time(now);
-        self.sim.pointer_down(pos, self.viewport.get(), time);
+        self.runtime.pointer_down(pos, self.viewport.get(), time);
     }
 
     /// 指针抬起。
@@ -134,7 +138,7 @@ impl CursorEffectState {
         if !self.enabled {
             return;
         }
-        self.sim.pointer_up(self.time(now));
+        self.runtime.pointer_up(self.time(now));
     }
 
     /// 指针移动：按住时喂拖尾；常驻拖尾模式下自行起一个只带拖尾的实例。
@@ -144,15 +148,10 @@ impl CursorEffectState {
         }
         let time = self.time(now);
         let viewport = self.viewport.get();
-        if self.sim.pointer_held() {
-            self.sim.pointer_move(pos, viewport, time);
-        } else if self.persistent_trail {
-            if self.sim.active() {
-                self.sim.pointer_move(pos, viewport, time);
-            } else {
-                self.sim.start_trail(pos, viewport, time);
-            }
-        }
+        // 按下时喂当前实例；没按下时（常驻拖尾）由运行时自己维护一个只带拖尾的
+        // 实例，上游 `SimulationRuntime::pointerMove` 同构。
+        self.runtime.set_always_on_trail_enabled(self.persistent_trail, time);
+        self.runtime.pointer_move(pos, viewport, time);
     }
 
     /// 每帧推进；返回是否还有可绘制内容（调用方据此决定是否持续出帧）。
@@ -161,11 +160,8 @@ impl CursorEffectState {
             return false;
         }
         let time = self.time(now);
-        self.sim.advance(time);
-        if !self.sim.active() {
-            return false;
-        }
-        self.sim.has_drawable_content(time)
+        self.runtime.advance(time);
+        self.runtime.rendering_required(time)
     }
 
     /// 渲染完一帧后调用（对应上游 `onFrameRendered`，负责回收）。
@@ -174,32 +170,32 @@ impl CursorEffectState {
             return;
         }
         let time = self.time(now);
-        self.sim.on_frame_rendered(time);
+        self.runtime.on_frame_rendered(time);
     }
 
     /// 取一帧快照并套用产品级视觉参数。
     pub fn snapshot(&self, viewport: Viewport, now: Instant) -> Snapshot {
-        let mut snapshot = self.sim.snapshot(viewport, self.time(now));
+        let mut snapshot = self.runtime.snapshot(viewport, self.time(now));
         apply_visual_config(&mut snapshot, &self.visual);
         snapshot
     }
 
     /// 关掉特效时清空全部粒子与拖尾。
     pub fn clear(&mut self) {
-        self.sim = Simulation::new(DEFAULT_SEED);
+        self.runtime.discard_active_effects();
     }
 
     pub fn has_content(&self) -> bool {
-        self.sim.active()
+        self.runtime.active()
     }
 
     /// 是否还需要继续出帧（对应上游「模拟仍激活」）。
     pub fn has_work(&self) -> bool {
-        self.enabled && self.sim.active()
+        self.enabled && self.runtime.active()
     }
 
     pub fn set_layer_visibility(&mut self, visibility: LayerVisibility) {
-        self.sim.set_layer_visibility(visibility);
+        self.runtime.set_layer_visibility(visibility);
     }
 }
 

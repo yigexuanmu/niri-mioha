@@ -58,7 +58,15 @@ uniform vec2 u_progress;   // 拖尾：纹理 u 起点与增量
 uniform vec4 u_axis;       // 拖尾：切线 xy、法线 zw（单位向量）
 uniform vec2 u_origin;     // 拖尾：段起点（相对四边形左上角的像素）
 uniform vec2 u_extent;     // 拖尾：段长与带宽（像素）
+uniform vec2 u_cap;        // 拖尾：首/尾段的纵向渐隐长度（像素，0 = 硬切）
 uniform float u_bloom;     // 辉光增益（0 = 关闭）
+/// 输出高度相对 1080p 的倍率。
+///
+/// **不能**用 `niri_size`：smithay 交给着色器的 `niri_size` 是四边形自身的尺寸，
+/// 而辉光半径是屏幕空间量（上游是整帧图像上的 mip 链）。用四边形尺寸做归一化，
+/// 光晕会缩到原来的几十分之一 —— 在离线 harness 里看不出来（那里 `niri_size`
+/// 恰好等于输出尺寸），一到实机就完全没有辉光。
+uniform float u_ref_scale;
 
 uniform sampler2D tex_disk;
 uniform sampler2D tex_ring;
@@ -95,10 +103,35 @@ const float AA_HALF_WIDTH = 0.5;
 /// 溶解阈值的软化半宽（Alpha 单位）。只影响阈值处的过渡，溶解形状基本不变。
 const float DISSOLVE_SOFTNESS = 0.02;
 
-/// 辉光扩散半径（单位：图元半尺寸）。
+/// 辉光扩散半径（单位：图元半尺寸）。圆盘 / 环 / 碎片用这一套。
 const float BLOOM_SIGMA = 0.4;
-/// 拖尾按半宽归一化，需要更肥的扩散才对得上上游那片雾状光晕。
-const float BLOOM_TRAIL_SIGMA = 1.1;
+/// 拖尾光晕的三段指数衰减长度（1080p 参考像素）。
+///
+/// 上游 `unity_bloom.cpp` 的 mip 链把一条只有 2~3px 宽的 HDR 带子抹成一大片
+/// 蓝雾：近场 3~4px 内陡降，中程二十几像素，远场一直拖到 100px 才见底。三段
+/// 指数叠起来才贴合官方图（`docs/images/native-click-trail.png`）的横向扫描
+/// 实测剖面 —— 单段高斯要么太窄（没有雾），要么太宽（变成一团糊）。
+///
+/// 注意单位是**像素**而不是半带宽：bloom 是屏幕空间后处理，半径只跟图像尺寸
+/// 有关。按半带宽归一化会让光晕缩成几像素 —— 那正是「拖尾没有辉光」的成因。
+const float BLOOM_TRAIL_FALLOFF_NEAR = 3.5;
+const float BLOOM_TRAIL_FALLOFF_MID = 22.0;
+const float BLOOM_TRAIL_FALLOFF_FAR = 90.0;
+const float BLOOM_TRAIL_NEAR_WEIGHT = 0.769;
+const float BLOOM_TRAIL_MID_WEIGHT = 0.225;
+const float BLOOM_TRAIL_FAR_WEIGHT = 0.006;
+/// 光晕的平滑截断位置（参考像素）。四边形留白按这个值算。
+const float BLOOM_TRAIL_HALO_END = 110.0;
+/// 拖尾的 HDR 强度是 23.97（`trailArtisticIntensity`），这是**直射色**的增益；
+/// 辉光不能直接套这个数。mip 链把一条 2~3px 宽的带子面积平均掉大半，真正漏进
+/// 光晕的只剩一小部分。按官方图反解：取拖尾亮段的作者色 (0, 0.39, 1.0)，要让
+/// 带子边缘处的线性蓝通道落在实测的 ≈1.3，系数就是 ≈0.25 —— 也就是说有效 HDR
+/// 强度 23.97 × 0.25 ≈ 6，正好和圆盘/碎片用的 `UNITY_HDR_INTENSITY`(5.99) 同级。
+///
+/// 这个系数必须对整条拖尾**统一**：上游的雾是逐像素累加出来的能量，颜色暗的
+/// 尾段本来就该比亮段暗。按最亮段标定、再用同一个系数乘下去，尾段的雾自然变
+/// 弱；反过来按暗段标定，亮段的雾会糊成一整块过曝的方块。
+const float BLOOM_TRAIL_SOURCE_SCALE = 0.25;
 /// 三角碎片在 128² 图集格里大致占半径 0.45 的圆；碎片本身很小，官方图里它的
 /// 光晕也贴得很紧，所以用更小的半径与更窄的扩散。
 const float TRIANGLE_GLOW_RADIUS = 0.45;
@@ -269,7 +302,6 @@ void main() {
         vec2 relative = pixel - u_origin;
         float along = dot(relative, u_axis.xy) / max(u_extent.x, 0.0001);
         float across = dot(relative, u_axis.zw) / max(u_extent.y, 0.0001) + 0.5;
-        float half_width = max(u_extent.y * 0.5, 0.0001);
         float particle_opacity = clamp(u_color_a, 0.0, 1.0);
         vec3 segment_color = mix(u_color, u_color_b, clamp(along, 0.0, 1.0));
         // 纵向覆盖必须算在分支外面：辉光是在分支外求的，如果只在采样分支里算，
@@ -298,13 +330,44 @@ void main() {
             coverage = material_coverage * global_opacity;
         }
 
-        // 条带在 (along, across) 空间里是一个矩形，两个方向的边界都要模糊。
-        float across_d = (abs(across - 0.5) * 2.0 - 1.0) * u_extent.y
-            / half_width;
-        float along_d = -min(along, 1.0 - along) * u_extent.x / half_width;
-        glow_source = segment_color * u_intensity;
-        glow_shape = blurred_inside(across_d, BLOOM_TRAIL_SIGMA)
-            * blurred_inside(along_d, BLOOM_TRAIL_SIGMA);
+        // 距离以「半带宽」为单位：条带边缘处为 0，向两侧变正。
+        // （不要再乘 2：那样算出来的像素距离会正好翻倍，光晕半径缩一半。）
+        float across_d = abs(across - 0.5) * 2.0 - 1.0;
+        float along_px = along * u_extent.x;
+        // 纵向权重。段内部恒为 1；接缝处两侧各占半个像素，加起来正好是 1，
+        // 所以一条连续的拖尾不会被逐段叠亮。超出本段范围即 0 —— 每个像素只会
+        // 被「它所在那一段」的光晕覆盖。
+        //
+        // 笔画的两端例外（`u_cap`）：那里没有「相邻段」可以接力，硬切会在拖尾
+        // 头部留下一道垂直于线段的直角边，几个线段拼起来就露出一个多边形轮廓。
+        // 所以两端放行纵向限制，改由下面的「到端点」径向距离来收缩 —— 光晕便
+        // 收成一个圆头，和上游整帧卷积出来的雾一致。
+        bool cap_start = u_cap.x > 0.5;
+        bool cap_end = u_cap.y > 0.5;
+        float rise = cap_start ? 1.0 : clamp(along_px + 0.5, 0.0, 1.0);
+        float fall = cap_end ? 1.0 : clamp(u_extent.x + 0.5 - along_px, 0.0, 1.0);
+        float along_mask = min(rise, fall);
+        // 到条带边缘的距离（像素，段内为负）。
+        float across_px = across_d * u_extent.y * 0.5;
+        if (cap_start && along_px < 0.0) {
+            across_px = length(vec2(along_px, across_px));
+        }
+        if (cap_end && along_px > u_extent.x) {
+            across_px = length(vec2(along_px - u_extent.x, across_px));
+        }
+        // 换算成 1080p 参考像素。
+        float ref_scale = max(u_ref_scale, 0.0001);
+        float edge_px = max(across_px, 0.0) / ref_scale;
+        float halo = BLOOM_TRAIL_NEAR_WEIGHT * exp(-edge_px / BLOOM_TRAIL_FALLOFF_NEAR)
+            + BLOOM_TRAIL_MID_WEIGHT * exp(-edge_px / BLOOM_TRAIL_FALLOFF_MID)
+            + BLOOM_TRAIL_FAR_WEIGHT * exp(-edge_px / BLOOM_TRAIL_FALLOFF_FAR);
+        // 平滑截断，让光晕在四边形内部就落到 0（否则边界上会留一道直边）。
+        halo *= 1.0 - smoothstep(
+            BLOOM_TRAIL_HALO_END * 0.8,
+            BLOOM_TRAIL_HALO_END,
+            edge_px);
+        glow_source = segment_color * u_intensity * BLOOM_TRAIL_SOURCE_SCALE;
+        glow_shape = along_mask * halo;
     }
 
     // ── 合成：严格对齐上游 `ResolveUnknownBackgroundDesktopTransport` ──
@@ -323,7 +386,15 @@ void main() {
     // 保守值，而 BA 在真实桌面上的圆盘是实心的（官方参考图里盘心蓝通道打满）。
     // 让实体区接近不透明、光晕区仍守在 0.90，两头都照顾到。
     float scene_coverage = clamp(coverage, 0.0, 1.0);
-    float bloom_coverage = linear_to_srgb_ch(bloom_weight);
+    // 上游 bloom 的 Alpha 通道是 `transportEnergy`：BrightPass 逐像素把
+    // `max(rgb)` 写进 a，mip 链里和 RGB 同步累加。于是 bloom 的 Alpha 就是
+    // **辉光自身的能量**，而不是「形状 × 增益」这个无量纲系数。
+    //
+    // 这里必须照同一个语义：拿 `bloom_weight` 去编码，等于让 Alpha 只跟形状
+    // 走，而 `capacity = alpha / peak` 又把颜色再压一次 —— 两层相乘后光晕会被
+    // 平方级压暗，薄雾直接消失（拖尾「没有辉光」就是这么来的）。
+    float bloom_coverage =
+        linear_to_srgb_ch(max(bloom_linear.r, max(bloom_linear.g, bloom_linear.b)));
     float alpha_limit = mix(TRANSPORT_ALPHA_LIMIT, 1.0, scene_coverage);
     float alpha = min(max(scene_coverage, bloom_coverage), alpha_limit);
 

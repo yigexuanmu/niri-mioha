@@ -59,6 +59,19 @@ impl Viewport {
     }
 }
 
+/// 1080p 参考像素倍率：`输出高度 / 1080`。
+///
+/// 辉光半径、光晕留白都按 1080p 参考像素标定（见 `docs/images/native-click-trail.png`
+/// 的实测剖面），运行时再乘这个倍率换算成当前输出的物理像素。
+pub fn reference_scale(viewport: Viewport) -> f32 {
+    let scale = viewport.height as f32 / 1080.0;
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
 /// 精灵材质种类。与上游 `SpriteKind` 的判别值一致（0/1/2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpriteKind {
@@ -95,21 +108,58 @@ pub struct TrailPoint {
     pub normalized_age: f32,
 }
 
+/// 一条独立的拖尾笔画。
+///
+/// 多个点击实例同时存在时，每条拖尾都要单独成条 —— 把不同时刻的两条轨迹首尾
+/// 接起来，会画出一条根本不存在的连线（上游 `TrailStroke` 同理）。
+#[derive(Debug, Clone, Default)]
+pub struct TrailStroke {
+    pub points: Vec<TrailPoint>,
+    /// 笔画宽度（物理像素）。
+    pub width: f32,
+}
+
 /// 一帧快照。
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub sprites: Vec<Sprite>,
     pub trail: Vec<TrailPoint>,
     pub trail_width: f32,
+    /// 多实例合并后的全部拖尾笔画（为空时退回 `trail` / `trail_width`）。
+    pub trail_strokes: Vec<TrailStroke>,
     pub trail_opacity: f32,
     pub global_opacity: f32,
     pub active: bool,
     pub pointer_held: bool,
+    /// 输出高度相对 1080p 的倍率（`output_height / 1080`）。
+    ///
+    /// 辉光半径是**屏幕空间**量（上游 `unity_bloom.cpp` 的 mip 链跑在整帧图像
+    /// 上），所以着色器里必须按像素而不是按图元尺寸算。而 smithay 交给着色器的
+    /// `niri_size` 是**四边形**尺寸，拿它当参考尺寸会让光晕缩成几个像素 —— 这里
+    /// 由渲染层显式传一个正确的倍率进去。
+    pub ref_scale: f32,
 }
 
 impl Snapshot {
     pub fn has_drawable_content(&self) -> bool {
-        !self.sprites.is_empty() || (self.trail_width > 0.0 && self.trail.len() >= 2)
+        !self.sprites.is_empty()
+            || !self.trail_strokes.is_empty()
+            || (self.trail_width > 0.0 && self.trail.len() >= 2)
+    }
+
+    /// 需要绘制拖尾的笔画（单实例的快照没有拆成笔画，这里统一成一条）。
+    pub fn strokes(&self) -> Vec<(&[TrailPoint], f32)> {
+        if !self.trail_strokes.is_empty() {
+            return self
+                .trail_strokes
+                .iter()
+                .map(|stroke| (stroke.points.as_slice(), stroke.width))
+                .collect();
+        }
+        if self.trail.len() >= 2 {
+            return vec![(self.trail.as_slice(), self.trail_width)];
+        }
+        Vec::new()
     }
 }
 
@@ -313,6 +363,18 @@ impl Simulation {
             trail: Vec::with_capacity(128),
             trail_parking_points: Vec::with_capacity(128),
         }
+    }
+
+    /// 池复用：换一条新的随机流，但**保留** `trail_time` 与停放状态。
+    ///
+    /// 上游注释：`FxTrailTimeScale` 是 `FXTouch` 的兄弟组件，`FXTouch.Stop`
+    /// 不会重置它，所以复用实例时必须让虚拟拖尾时间继续往上走（`reset_state`
+    /// 里会把锚点重新落在此刻），否则新实例的拖尾时间戳会退回 0。
+    pub fn prepare_pooled_activation(&mut self, seed: u64) {
+        self.base_seed = seed;
+        self.activation_count = 0;
+        self.random = Random::new(seed);
+        self.atlas_random = Random::new(seed ^ ATLAS_RANDOM_STREAM);
     }
 
     pub fn set_trail_length_multiplier(&mut self, multiplier: f32) {
@@ -605,6 +667,7 @@ impl Simulation {
             trail_width: TRAIL_WIDTH_WORLD * Self::world_to_pixels(viewport),
             trail_opacity: 1.0,
             global_opacity: 1.0,
+            ref_scale: reference_scale(viewport),
             ..Default::default()
         };
         if !self.active || viewport.width == 0 || viewport.height == 0 {
@@ -1162,6 +1225,9 @@ pub fn apply_global_scale(snapshot: &mut Snapshot, scale: f32) {
         }
     }
     snapshot.trail_width *= safe_scale;
+    for stroke in &mut snapshot.trail_strokes {
+        stroke.width *= safe_scale;
+    }
 }
 
 #[cfg(test)]

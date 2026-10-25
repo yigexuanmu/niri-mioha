@@ -20,8 +20,9 @@
 //! 着色器里反旋并铺满方形；拖尾段用 `u_origin`/`u_axis`/`u_extent` 把像素投影到
 //! 条带坐标系（段外不发光），于是也只需要一张轴对齐的包围盒四边形。
 //!
-//! 四边形还额外放大到图元的 [`BLOOM_QUAD_SCALE`] 倍：辉光是解析求的、会溢出形状
-//! 边缘，四边形不够大就会在边界上把光晕切出一圈台阶。
+//! 四边形还额外留白：辉光是解析求的、会溢出形状边缘，四边形不够大就会在边界
+//! 上把光晕切出一圈台阶。精灵按 [`BLOOM_QUAD_SCALE`] 放大；拖尾按屏幕空间的
+//! [`BLOOM_TRAIL_HALO_PX`]（1080p 参考像素 × 输出倍率）外扩。
 //!
 //! 混合：上游把 direct 与 bloom 在线性域相加、`LinearToSrgb` 编码、再按
 //! `capacityScale` 压成预乘色，最后用源覆盖交给系统合成。这里复刻同一套数学，
@@ -29,6 +30,10 @@
 //! 的字符粒子那样临时切加法混合。唯一的差别在 bloom：上游是独立的 mip 链后处理，
 //! niri 的「一个元素一次 draw」管线里没有后处理挂点，所以在 fragment shader 里用
 //! 解析形状近似（见 `cursor_effect.frag` 的辉光一节）。
+//!
+//! 注意辉光半径是**屏幕空间**量（像素），不是图元尺寸的倍数。所以拖尾的留白与
+//! 光晕衰减都走 [`ba::reference_scale`]，绝不能拿 smithay 的 `niri_size`（那是
+//! 四边形自身的尺寸）去归一化。
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -65,13 +70,15 @@ const QUAD_PADDING: f64 = 1.0;
 const BLOOM_QUAD_SCALE: f64 = 2.4;
 
 /// 与 `cursor_effect.frag` 的 `BLOOM_SIGMA` 保持同步（单位：图元半尺寸）。
+/// 只在测试里用于校验留白是否装得下光晕，因此不参与运行时计算。
+#[allow(dead_code)]
 const BLOOM_SIGMA: f64 = 0.4;
 
-/// 与 `cursor_effect.frag` 的 `BLOOM_TRAIL_SIGMA` 保持同步（单位：拖尾半带宽）。
-const BLOOM_TRAIL_SIGMA: f64 = 1.1;
-
-/// 拖尾段的辉光扩散更肥，所以两侧各留 3σ ≈ 3.3 个半带宽，也就是 1.65 倍带宽。
-const BLOOM_TRAIL_PADDING_SCALE: f64 = 1.65;
+/// 与 `cursor_effect.frag` 的 `BLOOM_TRAIL_HALO_END` 保持同步（1080p 参考像素）。
+///
+/// 光晕是屏幕空间的：半径只跟输出尺寸有关，与实际带宽无关。所以留白是「110 个
+/// 1080p 像素 × 输出倍率」，不再按带宽的倍数给。
+const BLOOM_TRAIL_HALO_PX: f64 = 110.0;
 
 /// 辉光增益，按上游官方演示图（`docs/images/native-click-trail.png`）的径向剖面
 /// 标定：圆盘内部约 +25%，1.6 倍半径处衰减到 ~5%，与实测 (0.31,0.35,0.50) 吻合。
@@ -138,6 +145,10 @@ pub struct DrawCommand {
     pub origin: [f32; 2],
     /// 拖尾：段长与带宽（像素）。
     pub extent: [f32; 2],
+    /// 拖尾：首段 / 尾段标记（1 = 辉光在它这一端收成圆头）。
+    pub cap: [f32; 2],
+    /// 输出高度相对 1080p 的倍率（辉光半径的像素口径）。
+    pub ref_scale: f32,
 }
 
 impl DrawCommand {
@@ -180,6 +191,8 @@ impl DrawCommand {
             axis: [1.0, 0.0, 0.0, 1.0],
             origin: [0.0, 0.0],
             extent: [side as f32, side as f32],
+            cap: [0.0, 0.0],
+            ref_scale: base.ref_scale,
         }
     }
 }
@@ -191,6 +204,7 @@ struct Base {
     gop: f32,
     intensity: f32,
     threshold: f32,
+    ref_scale: f32,
 }
 
 /// 把一帧快照翻成绘制命令列表（纯函数，按绘制顺序排列）。
@@ -212,6 +226,7 @@ pub fn build_commands(snapshot: &ba::Snapshot) -> Vec<DrawCommand> {
             gop: snapshot.global_opacity,
             intensity: sprite.intensity,
             threshold: sprite.dissolve_threshold,
+            ref_scale: snapshot.ref_scale,
         };
         let command = match sprite.kind {
             ba::SpriteKind::CenterDisk => DrawCommand::sprite(
@@ -250,12 +265,29 @@ pub fn build_commands(snapshot: &ba::Snapshot) -> Vec<DrawCommand> {
 }
 
 /// 拖尾：把相邻两个拖尾点之间贴一条四边形，逐顶点插值渐变颜色与纵向覆盖。
+///
+/// 多个点击实例同时存在时会有多条独立笔画，逐条单独铺段 —— 跨笔画接起来会画出
+/// 一条并不存在的连线。
 fn build_trail(snapshot: &ba::Snapshot, out: &mut Vec<DrawCommand>) {
-    let points = &snapshot.trail;
-    let width = snapshot.trail_width;
+    for (points, width) in snapshot.strokes() {
+        build_trail_stroke(points, width, snapshot, out);
+    }
+}
+
+fn build_trail_stroke(
+    points: &[ba::TrailPoint],
+    width: f32,
+    snapshot: &ba::Snapshot,
+    out: &mut Vec<DrawCommand>,
+) {
     if points.len() < 2 || !(width > 0.0) || !width.is_finite() {
         return;
     }
+    let ref_scale = if snapshot.ref_scale.is_finite() && snapshot.ref_scale > 0.0 {
+        snapshot.ref_scale
+    } else {
+        1.0
+    };
 
     // 累计弧长 → 归一化进度（上游 `makeUnityTrailMesh` 用同一套进度）。
     let mut distances = Vec::with_capacity(points.len());
@@ -285,7 +317,8 @@ fn build_trail(snapshot: &ba::Snapshot, out: &mut Vec<DrawCommand>) {
 
         // 四个角 → 轴对齐包围盒；再向外留辉光的溢出空间。
         let (nx, ny) = (normal.0 * half_width, normal.1 * half_width);
-        let pad = BLOOM_TRAIL_PADDING_SCALE * width as f64 + QUAD_PADDING;
+        let halo_pad = BLOOM_TRAIL_HALO_PX * ref_scale as f64;
+        let pad = halo_pad + QUAD_PADDING;
         let min_x = (from.x - nx).min(to.x - nx) as f64 - pad;
         let max_x = (from.x + nx).max(to.x + nx) as f64 + pad;
         let min_y = (from.y - ny).min(to.y - ny) as f64 - pad;
@@ -322,6 +355,13 @@ fn build_trail(snapshot: &ba::Snapshot, out: &mut Vec<DrawCommand>) {
             axis: [tangent.0, tangent.1, normal.0, normal.1],
             origin: [from.x - quad.loc.x as f32, from.y - quad.loc.y as f32],
             extent: [length, width],
+            // 首/尾段标记：辉光在笔画两端收成圆头（见 shader 的 `u_cap`），
+            // 中间的段保持硬切，相邻两段加起来才是 1。
+            cap: [
+                if index == 1 { 1.0 } else { 0.0 },
+                if index + 1 == points.len() { 1.0 } else { 0.0 },
+            ],
+            ref_scale,
         });
     }
 }
@@ -420,7 +460,9 @@ impl CursorEffectElement {
             Uniform::new("u_axis", command.axis),
             Uniform::new("u_origin", command.origin),
             Uniform::new("u_extent", command.extent),
+            Uniform::new("u_cap", command.cap),
             Uniform::new("u_bloom", BLOOM_GAIN),
+            Uniform::new("u_ref_scale", command.ref_scale),
         ]);
 
         let textures = HashMap::from([(
@@ -599,6 +641,7 @@ mod tests {
             gop: 1.0,
             intensity: 1.0,
             threshold: 0.0,
+            ref_scale: 1.0,
         };
         let command = DrawCommand::sprite(
             Material::Triangle,
@@ -627,12 +670,52 @@ mod tests {
             BLOOM_QUAD_SCALE > halo,
             "四边形放大 {BLOOM_QUAD_SCALE} 倍，容不下 {halo} 倍半尺寸的辉光"
         );
-        // 拖尾按半带宽归一化：留白换算成半带宽是 2 × BLOOM_TRAIL_PADDING_SCALE。
-        let trail_halo = 2.0 * BLOOM_TRAIL_SIGMA;
-        assert!(
-            2.0 * BLOOM_TRAIL_PADDING_SCALE > trail_halo,
-            "拖尾四边形留白容不下 {trail_halo} 个半带宽的辉光"
-        );
+    }
+
+    #[test]
+    fn trail_quad_keeps_room_for_the_screen_space_halo() {
+        // 拖尾的光晕是屏幕空间的：留白等于「1080p 参考像素 × 输出倍率」，与带宽
+        // 无关。1080p / 1440p / 4K 三档都要盖住光晕半径。
+        for height in [1080_u32, 1440, 2160] {
+            let scale = ba::reference_scale(ba::Viewport::new(1920, height));
+            // 一条水平笔画：包围盒高度 = 带宽 + 2 × 留白，便于反解留白。
+            let width = 0.005 * height as f32 / 2.0;
+            let snapshot = ba::Snapshot {
+                trail_strokes: vec![ba::TrailStroke {
+                    points: vec![
+                        ba::TrailPoint {
+                            position: ba::Point::new(400.0, 500.0),
+                            normalized_age: 0.0,
+                        },
+                        ba::TrailPoint {
+                            position: ba::Point::new(600.0, 500.0),
+                            normalized_age: 1.0,
+                        },
+                    ],
+                    width,
+                }],
+                trail_opacity: 1.0,
+                global_opacity: 1.0,
+                ref_scale: scale,
+                ..Default::default()
+            };
+
+            let commands = build_commands(&snapshot);
+            let trail: Vec<&DrawCommand> = commands
+                .iter()
+                .filter(|c| c.material == Material::Trail)
+                .collect();
+            assert_eq!(trail.len(), 1, "一条笔画应铺一段");
+            let command = trail[0];
+            let room = command.quad.size.h as f64 * 0.5 - command.extent[1] as f64 * 0.5;
+            let need = BLOOM_TRAIL_HALO_PX * scale as f64;
+            assert!(
+                room + 1e-6 >= need,
+                "输出高 {height}：留白 {room}px 容不下 {need}px 的光晕"
+            );
+            // 传进着色器的倍率必须和留白用的是同一个。
+            assert!((command.ref_scale - scale).abs() < 1e-6);
+        }
     }
 
     #[test]

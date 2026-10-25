@@ -14,11 +14,16 @@
 
 pub mod curve;
 pub mod lz4;
+pub mod runtime;
 pub mod sim;
 pub mod textures;
 pub mod trail;
 
-pub use sim::{apply_global_scale, LayerVisibility, Point, Simulation, Snapshot, Sprite, SpriteKind, Viewport};
+pub use runtime::SimulationRuntime;
+pub use sim::{
+    apply_global_scale, reference_scale, LayerVisibility, Point, Simulation, Snapshot, Sprite,
+    SpriteKind, TrailPoint, TrailStroke, Viewport,
+};
 
 use curve::{ClickParticleSettings, ShardParticleSettings};
 
