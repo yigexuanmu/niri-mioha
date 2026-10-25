@@ -370,7 +370,19 @@ void main() {
         float along_raw = dot(relative, u_axis.xy);
         float across = dot(relative, u_axis.zw) / max(u_extent.y, 0.0001) + 0.5;
         // 段内归一化坐标，供颜色渐变 / 纹理 / 覆盖度使用。
-        float along = along_raw / max(u_extent.x, 0.0001);
+        //
+        // **必须按真实段长归一化，不能用 `u_extent.x`**。`u_extent.x` 是「段长 +
+        // 两端各一个扩展区」，比段长多出 2 × `BLOOM_TRAIL_JOINT_PX`。拿它归一化会
+        // 同时犯两个错：
+        //   1. 亮带被画到段尾之外 22px（沿方向越界到邻居的地盘），相邻两段的带子
+        //      在关节处重叠 —— 而这里是预乘 over 合成，不是相加，后画的把先画的
+        //      整块擦掉。四边形边界上实测残留亮度 254/255，就是拖尾上那些带直边
+        //      的矩形块。
+        //   2. `u_progress` / `u_cov` / 颜色渐变只走到 length / (length + 44)
+        //      ≈ 0.62，拖尾的纵向淡出与配色被整体拉长 1.6 倍。
+        float joint_px_len = BLOOM_TRAIL_JOINT_PX * ref_scale;
+        float seg_len = max(u_extent.x - 2.0 * joint_px_len, 1.0);
+        float along = along_raw / seg_len;
         float particle_opacity = clamp(u_color_a, 0.0, 1.0);
         vec3 segment_color = mix(u_color, u_color_b, clamp(along, 0.0, 1.0));
         // 纵向覆盖必须算在分支外面：辉光是在分支外求的，如果只在采样分支里算，
@@ -409,7 +421,6 @@ void main() {
         // 距离以「半带宽」为单位：条带边缘处为 0，向两侧变正。
         // （不要再乘 2：那样算出来的像素距离会正好翻倍，光晕半径缩一半。）
         float across_d = abs(across - 0.5) * 2.0 - 1.0;
-        float along_px = along * u_extent.x;
         // 纵向权重：互补斜坡必须放在**段外的扩展区**里。
         //
         // 雾的宽度由三段指数决定（主衰减 3.5px、中段 22px），实际铺开约 20px；
@@ -420,8 +431,8 @@ void main() {
         // 扩展区：段内恒为 1，扩展区内从 0 平滑过渡到 1。相邻两段在同一处恰好
         // 一个上升、一个下降，相加恒等于 1 —— 于是段 i 的雾能一直铺到段 i+1
         // 的领地里，由段 i+1 在那里接棒，既不留缝也不会叠亮。
-        float joint_px = BLOOM_TRAIL_JOINT_PX * ref_scale;
-        float seg_len_px = u_extent.x - 2.0 * joint_px;
+        float joint_px = joint_px_len;
+        float seg_len_px = seg_len;
         // 斜坡宽度按段长自适应：`render.rs` 的弓高合并保证段长通常 ≥ 2 × 斜坡，
         // 这里只是兜底 —— 万一出现短段，把斜坡压到段长一半，段内仍能保住满强度
         // 的平台。否则 rise 与 fall 会在段正中间相交，整段雾被乘到 0.5~0.67，
