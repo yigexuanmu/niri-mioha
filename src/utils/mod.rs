@@ -154,7 +154,7 @@ pub fn version() -> String {
         option_env!("NIRI_BUILD_COMMIT").unwrap_or(git_version!(fallback = "unknown commit"));
 
     // Mark builds of this fork, so that they can't be mistaken for upstream niri.
-    const FORK: &str = "-shorin";
+    const FORK: &str = "-mioha";
 
     if PATCH == "0" {
         format!("{MAJOR}.{MINOR:0>2}{FORK} ({commit})")
