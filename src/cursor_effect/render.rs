@@ -299,49 +299,54 @@ pub fn build_commands(snapshot: &ba::Snapshot) -> Vec<DrawCommand> {
 /// 拖尾：把相邻两个拖尾点之间贴一条四边形，逐顶点插值渐变颜色与纵向覆盖。
 ///
 /// 多个点击实例同时存在时会有多条独立笔画，逐条单独铺段 —— 跨笔画接起来会画出
-/// 相邻段的夹角阈值（弧度）与单条合并段的最大长度（像素）。
-const TRAIL_MERGE_ANGLE: f64 = 1.5 * std::f64::consts::PI / 180.0;
-const TRAIL_MERGE_MAX_LENGTH: f64 = 50.0;
-
-/// 把折线点序列按「近共线」合并成若干直线段，返回 `[首点下标, 尾下标]`。
+/// 合并段内中间点到首尾连线的最大弓高（像素）。
 ///
-/// 合并条件：与当前段**首段方向**的夹角不超过阈值，且累计长度不超上限。
-/// 弓高上限 ≈ 50 × sin(1.5°) ≈ 1.3px，小于拖尾半宽，直线近似不漏光。
+/// 必须小于拖尾半宽（1080p 下 1.35px），否则直线近似会从带宽里漏出去。选 1.2
+/// 留一点余量：漏掉的那一角由雾自己补上（光晕铺开 20px+）。
+const TRAIL_MERGE_BOW: f64 = 1.2;
+/// 单条合并段的最大长度（像素）。拖尾整条可能几百像素，不封顶的话一个四边形
+/// 会横跨大半个屏幕，白白吃掉填充率。
+const TRAIL_MERGE_MAX_LENGTH: f64 = 220.0;
+
+/// 把折线点序列按「弓高」合并成若干直线段，返回 `[首点下标, 尾下标]`。
+///
+/// 合并条件：候选段内所有中间点到首尾连线的距离不超过 `TRAIL_MERGE_BOW`，且
+/// 累计长度不超上限。早先用固定夹角（1.5°）判断，鼠标一画圈方向就持续变化，
+/// 每 15px 断一次，段长远小于光晕需要接力的 44px —— 拖尾的雾于是一段暗一段
+/// 亮，画个圈全暴露出来。改弓高之后，直路上能并出上百像素，弯道上按实际偏离
+/// 断开，两者都满足「段长 ≥ 2 × 互补斜坡」。
 fn merge_collinear_runs(points: &[ba::TrailPoint], distances: &[f32]) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
-    let mut run_dir: Option<(f64, f64)> = None;
 
     for index in 1..points.len() {
-        let dx = (points[index].position.x - points[index - 1].position.x) as f64;
-        let dy = (points[index].position.y - points[index - 1].position.y) as f64;
-        let len = (dx * dx + dy * dy).sqrt();
-        if !len.is_finite() || len < 1e-3 {
-            continue;
-        }
-        let dir = (dx / len, dy / len);
-
-        let keep = match run_dir {
-            None => true,
-            Some((bx, by)) => {
-                let dot = (bx * dir.0 + by * dir.1).clamp(-1.0, 1.0);
-                let angle = dot.acos();
-                let projected = (distances[index] - distances[start]) as f64;
-                angle <= TRAIL_MERGE_ANGLE && projected <= TRAIL_MERGE_MAX_LENGTH
-            }
-        };
-        if keep {
-            if run_dir.is_none() {
-                run_dir = Some(dir);
-            }
-        } else {
+        let projected = (distances[index] - distances[start]) as f64;
+        let keep = projected <= TRAIL_MERGE_MAX_LENGTH
+            && (start + 1..index).all(|middle| {
+                bow(
+                    points[middle].position,
+                    points[start].position,
+                    points[index].position,
+                ) <= TRAIL_MERGE_BOW
+            });
+        if !keep {
             runs.push((start, index - 1));
             start = index - 1;
-            run_dir = Some(dir);
         }
     }
     runs.push((start, points.len() - 1));
     runs
+}
+
+/// 点到直线 `a→b` 的距离（像素）。
+fn bow(p: ba::Point, a: ba::Point, b: ba::Point) -> f64 {
+    let (abx, aby) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+    let (apx, apy) = ((p.x - a.x) as f64, (p.y - a.y) as f64);
+    let length = (abx * abx + aby * aby).sqrt();
+    if length < 1e-9 {
+        return (apx * apx + apy * apy).sqrt();
+    }
+    (apx * aby - apy * abx).abs() / length
 }
 
 /// 一条并不存在的连线。

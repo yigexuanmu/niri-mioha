@@ -377,7 +377,14 @@ void main() {
         // 已经淡出到 0 的尾段（插值色是黑的）就会在四边形留白处被光晕画成一道
         // 黑边。
         float longitudinal = mix(u_cov.x, u_cov.y, clamp(along, 0.0, 1.0));
-        element_opacity = particle_opacity * clamp(longitudinal, 0.0, 1.0);
+        // `element_opacity` **只跟顶点 alpha 走**，不乘 `longitudinal`。
+        //
+        // `u_cov` 是沿进度的**实体**覆盖度，上游曲线在 progress ≤ 0.2485 处恒为
+        // 0 —— 也就是说拖尾总有四分之一长的一段本来就没有实体线。早期把它乘进
+        // `element_opacity`，而 `element_opacity` 又是 `bloom_weight` 的因子，于是
+        // 那一段的雾跟着一起归零：实测就是「一刀切，直接光晕就没了」。上游 bloom
+        // 是整帧卷积，实体有没有不影响雾铺不铺。
+        element_opacity = particle_opacity;
 
         if (along >= 0.0 && along <= 1.0 && across >= 0.0 && across <= 1.0) {
             vec4 texel = texture2D(
@@ -415,26 +422,22 @@ void main() {
         // 的领地里，由段 i+1 在那里接棒，既不留缝也不会叠亮。
         float joint_px = BLOOM_TRAIL_JOINT_PX * ref_scale;
         float seg_len_px = u_extent.x - 2.0 * joint_px;
-        // 笔画的两端例外（`u_cap`）：那里没有「相邻段」可以接力，放行纵向限制，
-        // 改由下面的「到端点」径向距离来收缩 —— 光晕便收成一个圆头，和上游整帧
-        // 卷积出来的雾一致。
-        bool cap_start = u_cap.x > 0.5;
-        bool cap_end = u_cap.y > 0.5;
-        float rise = cap_start
-            ? 1.0
-            : clamp((along_raw + joint_px) / (2.0 * joint_px), 0.0, 1.0);
-        float fall = cap_end
-            ? 1.0
-            : clamp((seg_len_px + joint_px - along_raw) / (2.0 * joint_px), 0.0, 1.0);
+        // 斜坡宽度按段长自适应：`render.rs` 的弓高合并保证段长通常 ≥ 2 × 斜坡，
+        // 这里只是兜底 —— 万一出现短段，把斜坡压到段长一半，段内仍能保住满强度
+        // 的平台。否则 rise 与 fall 会在段正中间相交，整段雾被乘到 0.5~0.67，
+        // 段长不一时拖尾就一块亮一块暗。
+        //
+        // **笔画两端不再特殊处理**。早期给首尾段开了一张「放行纵向限制 + 按到
+        // 端点的径向距离收缩」的后门，本意是收个圆头；实测那恰恰是用户看到的
+        // 「规整半圆、一刀切」：末端段在段外变成一团圆形雾，与相邻中间段的矩形
+        // 雾交界处就是一道硬半圆。现在两端和中间一视同仁地按斜坡淡出到 0，
+        // 虽然收尾短一点，但没有任何形状突变。
+        float jp = min(joint_px, seg_len_px * 0.5);
+        float rise = clamp((along_raw + jp) / (2.0 * jp), 0.0, 1.0);
+        float fall = clamp((seg_len_px + jp - along_raw) / (2.0 * jp), 0.0, 1.0);
         float along_mask = min(rise, fall);
         // 到条带边缘的距离（像素，段内为负）。
         float across_px = across_d * u_extent.y * 0.5;
-        if (cap_start && along_raw < 0.0) {
-            across_px = length(vec2(along_raw, across_px));
-        }
-        if (cap_end && along_raw > seg_len_px) {
-            across_px = length(vec2(along_raw - seg_len_px, across_px));
-        }
         // 换算成 1080p 参考像素。
         float edge_px = max(across_px, 0.0) / ref_scale;
         float halo = BLOOM_TRAIL_NEAR_WEIGHT * exp(-edge_px / BLOOM_TRAIL_FALLOFF_NEAR)
