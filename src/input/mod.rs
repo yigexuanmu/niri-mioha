@@ -182,7 +182,6 @@ impl State {
 
         if should_cancel_pending_modifier_bind(&event) {
             self.niri.pending_modifier_bind = None;
-            self.niri.pending_default_mod_tap = None;
         }
 
         let mut consumed_by_a11y = false;
@@ -523,13 +522,6 @@ impl State {
                         &mut this.niri.pending_modifier_bind,
                         key_code,
                     );
-                    if this
-                        .niri
-                        .pending_default_mod_tap
-                        .is_some_and(|pending| pending != key_code)
-                    {
-                        this.niri.pending_default_mod_tap = None;
-                    }
                 }
 
                 // After updating XKB state from accessibility-grabbed keys, return right away and
@@ -600,17 +592,6 @@ impl State {
                             &this.niri.screenshot_ui,
                             is_inhibiting_shortcuts,
                         );
-
-                        // If no config bind was found for this modifier tap, and this is the
-                        // mod key, track it as a potential default mod tap (for grid-overview).
-                        if this.niri.pending_modifier_bind.is_none()
-                            && modifier_from_keysym(raw) == Some(mod_key.to_modifiers())
-                            && config.grid_overview.default_mod_action
-                            && !this.niri.screenshot_ui.is_open()
-                            && !is_inhibiting_shortcuts
-                        {
-                            this.niri.pending_default_mod_tap = Some(key_code);
-                        }
                     } else if !pressed
                         && this
                             .niri
@@ -624,13 +605,6 @@ impl State {
                             key_code,
                             is_inhibiting_shortcuts,
                         );
-                    } else if let Some(filter) = finish_pending_default_mod_tap(
-                        &mut this.niri.pending_default_mod_tap,
-                        key_code,
-                        pressed,
-                    ) {
-                        this.do_action(Action::ToggleGridOverview, false);
-                        return filter;
                     }
                 }
 
@@ -5458,21 +5432,6 @@ fn finish_pending_modifier_bind(
     *completed_modifier_bind = Some(pending.bind);
 }
 
-fn finish_pending_default_mod_tap(
-    pending_default_mod_tap: &mut Option<Keycode>,
-    key_code: Keycode,
-    pressed: bool,
-) -> Option<FilterResult<Option<Bind>>> {
-    if pressed || pending_default_mod_tap.as_ref() != Some(&key_code) {
-        return None;
-    }
-
-    *pending_default_mod_tap = None;
-
-    // The modifier press was forwarded, so its matching release must be forwarded too.
-    Some(FilterResult::Forward)
-}
-
 fn cancel_pending_modifier_bind_for_key(
     pending_modifier_bind: &mut Option<PendingModifierBind>,
     key_code: Keycode,
@@ -6792,40 +6751,6 @@ mod tests {
         assert!(suppressed_keys.is_empty());
         assert!(pending_modifier_bind.is_none());
         assert_eq!(completed_modifier_bind, Some(bind));
-    }
-
-    #[test]
-    fn default_mod_tap_press_and_release_are_forwarded() {
-        let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
-        let key_code = Keycode::from(Keysym::Super_L.raw() + 8);
-        let mods = ModifiersState {
-            logo: true,
-            ..Default::default()
-        };
-        let mut suppressed_keys = HashSet::new();
-
-        let press = should_intercept_key(
-            &mut suppressed_keys,
-            std::iter::empty::<&Bind>(),
-            ModKey::Super,
-            key_code,
-            Keysym::Super_L,
-            Some(Keysym::Super_L),
-            true,
-            mods,
-            &screenshot_ui,
-            false,
-            false,
-        );
-        assert!(matches!(press, FilterResult::Forward));
-        assert!(suppressed_keys.is_empty());
-
-        let mut pending_default_mod_tap = Some(key_code);
-        let release = finish_pending_default_mod_tap(&mut pending_default_mod_tap, key_code, false)
-            .expect("matching default Mod tap release should complete");
-        assert!(matches!(release, FilterResult::Forward));
-        assert!(pending_default_mod_tap.is_none());
-        assert!(suppressed_keys.is_empty());
     }
 
     #[test]

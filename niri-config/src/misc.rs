@@ -491,7 +491,6 @@ pub struct GridOverview {
     pub focus_ring_transition: GridFocusRingTransition,
     pub focus_follows_mouse: Option<GridFocusFollowsMouse>,
     pub grid_all_monitors: bool,
-    pub default_mod_action: bool,
     pub minimized_highlight: GridMinimizedHighlight,
 }
 
@@ -636,7 +635,6 @@ impl Default for GridOverview {
             focus_ring_transition: GridFocusRingTransition::default(),
             focus_follows_mouse: None,
             grid_all_monitors: true,
-            default_mod_action: true,
             minimized_highlight: GridMinimizedHighlight::default(),
         }
     }
@@ -777,8 +775,6 @@ pub struct GridOverviewPart {
     pub focus_follows_mouse: Option<GridFocusFollowsMouse>,
     #[knuffel(child, unwrap(argument))]
     pub grid_all_monitors: Option<bool>,
-    #[knuffel(child, unwrap(argument))]
-    pub default_mod_action: Option<bool>,
     #[knuffel(child)]
     pub minimized_highlight: Option<GridMinimizedHighlightPart>,
 }
@@ -805,9 +801,6 @@ impl MergeWith<GridOverviewPart> for GridOverview {
         }
         if let Some(grid_all_monitors) = part.grid_all_monitors {
             self.grid_all_monitors = grid_all_monitors;
-        }
-        if let Some(default_mod_action) = part.default_mod_action {
-            self.default_mod_action = default_mod_action;
         }
         merge!((self, part), minimized_highlight);
     }

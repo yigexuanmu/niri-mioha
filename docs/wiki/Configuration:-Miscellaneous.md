@@ -474,20 +474,6 @@ grid-overview {
 }
 ```
 
-#### `default-mod-action`
-
-<sup>Since: 26.04 (fork)</sup>
-
-When `true` (the default), tapping the `Mod` key (pressing and releasing without pressing any other key in between) will toggle the Grid Overview, even if no `Mod` binding is configured in `binds`.
-
-Set this to `false` to disable this built-in behavior. This does not affect explicit `Mod` bindings in `binds` — those always take precedence.
-
-```kdl
-grid-overview {
-    default-mod-action false
-}
-```
-
 ### `xwayland-satellite`
 
 <sup>Since: 25.08</sup>

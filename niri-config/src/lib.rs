@@ -2155,7 +2155,6 @@ mod tests {
                 focus_ring_transition: Grow,
                 focus_follows_mouse: None,
                 grid_all_monitors: true,
-                default_mod_action: true,
                 minimized_highlight: GridMinimizedHighlight {
                     off: false,
                     color: Color {

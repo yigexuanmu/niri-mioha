@@ -382,11 +382,6 @@ grid-overview {
     // Uncomment to move the focus to the cell under the pointer as the mouse moves.
     // focus-follows-mouse min-distance=8
 
-    // When true (the default), tapping the Mod key alone (press and release without
-    // pressing any other key) toggles the grid overview, even without an explicit binding.
-    // Set to false to disable this built-in behavior.
-    // default-mod-action false
-
     // Frame drawn around the cells of minimized windows, so you can tell them apart from
     // the normal ones. Same knobs as the recent-windows highlight.
     // Uncomment "off" to remove it.
@@ -550,6 +545,8 @@ binds {
 
     // Tap Mod (press and release without pressing any other key in between)
     // to toggle the grid overview: a view of all windows on the current workspaces.
+    // Like the magnifier below, this is an ordinary binding: it only works while this
+    // line is present, so rebind or delete it to change or disable the Mod tap.
     Mod repeat=false { toggle-grid-overview; }
 
     // Toggle the fullscreen magnifier on or off.
