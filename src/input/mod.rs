@@ -3047,18 +3047,16 @@ impl State {
         #[cfg(feature = "dbus")]
         self.a11y_notify_pointer_motion();
 
-        // 光标特效：把指针移动喂给粒子状态机（生成拖尾）。
-        // 每个 motion 事件都喂（内部按 ~2px 距离阈值过滤），不做时间节流：
-        // 渲染由 vblank 驱动，节流反而会让快速移动时的拖尾变成断续直线。
+        // 光标特效：把指针移动喂给拖尾（内部按 ≥5.4px 的步长抽点）。
+        // 每个 motion 事件都喂，不做时间节流：渲染由 vblank 驱动，节流反而会让
+        // 快速移动时的拖尾变成断续直线。
         {
-            let (gx, gy) = (new_pos.x as f32, new_pos.y as f32);
             let now = Instant::now();
-            let ce = &mut self.niri.cursor_effect;
-            if ce.enabled && (ce.is_down || ce.persistent_trail) {
-                ce.on_move(gx, gy, now, &mut crate::cursor_effect::state::FastrandRng);
-            } else {
-                // 没在出拖尾时也记下当前位置，避免下次启用时 last_pos 陈旧。
-                ce.last_pos = Some((gx, gy));
+            if let Some((pos, viewport)) = crate::cursor_effect::output_local_pointer(&self.niri, new_pos)
+            {
+                let ce = &mut self.niri.cursor_effect;
+                ce.set_viewport(viewport);
+                ce.on_move(pos, now);
             }
         }
 
@@ -3178,18 +3176,13 @@ impl State {
         #[cfg(feature = "dbus")]
         self.a11y_notify_pointer_motion();
 
-        // 光标特效：把指针移动喂给粒子状态机（生成拖尾）。
-        // 每个 motion 事件都喂（内部按 ~2px 距离阈值过滤），不做时间节流：
-        // 渲染由 vblank 驱动，节流反而会让快速移动时的拖尾变成断续直线。
+        // 光标特效：把指针移动喂给拖尾（内部按 ≥5.4px 的步长抽点）。
         {
-            let (gx, gy) = (pos.x as f32, pos.y as f32);
             let now = Instant::now();
-            let ce = &mut self.niri.cursor_effect;
-            if ce.enabled && (ce.is_down || ce.persistent_trail) {
-                ce.on_move(gx, gy, now, &mut crate::cursor_effect::state::FastrandRng);
-            } else {
-                // 没在出拖尾时也记下当前位置，避免下次启用时 last_pos 陈旧。
-                ce.last_pos = Some((gx, gy));
+            if let Some((fx, viewport)) = crate::cursor_effect::output_local_pointer(&self.niri, pos) {
+                let ce = &mut self.niri.cursor_effect;
+                ce.set_viewport(viewport);
+                ce.on_move(fx, now);
             }
         }
 
@@ -3652,39 +3645,24 @@ impl State {
             }
         }
 
-        // 光标特效：把按键状态喂给粒子状态机（点击爆裂 + 按住拖尾）。
+        // 光标特效：按键按下触发点击爆裂（同时开始拖尾），抬起结束拖尾。
         {
             let is_left = button == Some(MouseButton::Left);
-            let is_right = button == Some(MouseButton::Right);
             let is_middle = button == Some(MouseButton::Middle);
+            let now = Instant::now();
             let loc = pointer.current_location();
-            let (gx, gy) = (loc.x as f32, loc.y as f32);
+            let target = crate::cursor_effect::output_local_pointer(&self.niri, loc);
             let ce = &mut self.niri.cursor_effect;
-            if ButtonState::Pressed == button_state {
-                if ce.enabled && ce.click_trigger.accepts(is_left, is_right) {
-                    ce.is_down = true;
-                    // 左键用左键色、右键用右键色。
-                    if is_right {
-                        ce.color = ce.color_right;
-                        ce.rings_end_color =
-                            crate::cursor_effect::state::rings_end_color_from_rgb(ce.color_right);
-                    } else {
-                        ce.color = ce.color_left;
-                        ce.rings_end_color =
-                            crate::cursor_effect::state::rings_end_color_from_rgb(ce.color_left);
+            if let Some((pos, viewport)) = target {
+                ce.set_viewport(viewport);
+                if ButtonState::Pressed == button_state {
+                    if is_left || is_middle || button == Some(MouseButton::Right) {
+                        ce.on_button_press(pos, now, is_left, is_middle);
                     }
-                    ce.create_effects(gx, gy, &mut crate::cursor_effect::state::FastrandRng);
-                    ce.last_pos = Some((gx, gy));
-                } else if ce.enabled && is_middle && ce.middle_click_trigger {
-                    ce.color = ce.color_middle;
-                    ce.rings_end_color =
-                        crate::cursor_effect::state::rings_end_color_from_rgb(ce.color_middle);
-                    ce.is_down = true; // 中键长按也出拖尾
-                    ce.create_effects(gx, gy, &mut crate::cursor_effect::state::FastrandRng);
-                    ce.last_pos = Some((gx, gy));
                 }
-            } else if is_left || is_right || is_middle {
-                ce.is_down = false;
+            }
+            if ButtonState::Released == button_state {
+                ce.on_button_release(now);
             }
         }
 
@@ -3870,19 +3848,7 @@ impl State {
                 self.niri.horizontal_wheel_tracker.reset();
             }
 
-            // 光标特效：任何垂直滚轮位移都喂给特效（不等整档 tick 才出现），
-            // 旋转角按位移量比例注入 → 转得快慢跟随滚轮快慢。
-            if let Some(vertical) = vertical_amount_v120 {
-                if vertical != 0.0 {
-                    let loc = pointer.current_location();
-                    self.niri.cursor_effect.on_scroll(
-                        loc.x as f32,
-                        loc.y as f32,
-                        vertical as f32,
-                        &mut crate::cursor_effect::state::FastrandRng,
-                    );
-                }
-            }
+            // 光标特效：BA 点击特效没有滚轮图层，滚轮只走 niri 自己的绑定。
 
             if use_builtin_bindings || has_vertical_wheel_binds {
                 let vertical = vertical_amount_v120.unwrap_or(0.);

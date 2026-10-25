@@ -1,13 +1,10 @@
 use std::cell::RefCell;
 
 use glam::Mat3;
-use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
+    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform, UniformName,
     UniformType, UniformValue,
 };
-use smithay::backend::renderer::ImportMem;
-use smithay::utils::Size;
 
 use super::renderer::NiriRenderer;
 use super::shader_element::ShaderProgram;
@@ -21,14 +18,14 @@ pub struct Shaders {
     pub resize: Option<ShaderProgram>,
     pub gradient_fade: Option<GlesTexProgram>,
     pub blur: Option<BlurProgram>,
-    /// 光标特效 shader（字形粒子，见 `cursor_effect.frag`）。
+    /// 光标特效材质 shader（圆盘/溶解环/三角碎片/拖尾，见 `cursor_effect.frag`）。
     ///
     /// 与 custom_resize/close/open 不同，这个程序只由本 crate 的
     /// `cursor_effect::render` 使用，不会被外部覆盖，因此单独存放。
     pub cursor_effect: Option<ShaderProgram>,
-    /// 字符模式用的字形图集纹理（`cursor_effect::glyphs` 展开的 BGRA 位图）。
-    /// 所有光标特效渲染元素共享这一张纹理；为 `None` 时不绘制任何粒子。
-    pub cursor_effect_atlas: Option<GlesTexture>,
+    /// 光标特效的四张材质纹理（圆盘 / 溶解环 / 三角图集 / 拖尾）。为 `None`
+    /// 时不绘制任何特效元素。
+    pub cursor_effect_textures: Option<crate::cursor_effect::render::CursorEffectTextures>,
     pub custom_resize: RefCell<Option<ShaderProgram>>,
     pub custom_close: RefCell<Option<ShaderProgram>>,
     pub custom_open: RefCell<Option<ShaderProgram>>,
@@ -41,7 +38,8 @@ pub enum ProgramType {
     Resize,
     Close,
     Open,
-    /// 光标特效（字形粒子）；fragment shader 见 `shaders/cursor_effect.frag`。
+    /// 光标特效（BA 点击特效的圆盘 / 溶解环 / 三角碎片 / 拖尾）；fragment shader
+    /// 见 `shaders/cursor_effect.frag`。
     CursorEffect,
 }
 
@@ -161,40 +159,42 @@ impl Shaders {
             })
             .ok();
 
-        // 光标特效字形 shader。frag 里用到的每个 uniform 都必须在这里注册，
+        // 光标特效材质 shader。frag 里用到的每个 uniform 都必须在这里注册，
         // 否则 smithay 绘制时查不到 location → UnknownUniform panic。
         let cursor_effect = ShaderProgram::compile(
             renderer,
             include_str!("cursor_effect.frag"),
             &[
                 UniformName::new("input_to_geo", UniformType::Matrix3x3),
+                UniformName::new("u_mode", UniformType::_1f),
                 UniformName::new("u_color", UniformType::_3f),
+                UniformName::new("u_color_b", UniformType::_3f),
+                UniformName::new("u_color_a", UniformType::_1f),
+                UniformName::new("u_gop", UniformType::_1f),
+                UniformName::new("u_intensity", UniformType::_1f),
+                UniformName::new("u_threshold", UniformType::_1f),
                 UniformName::new("u_center", UniformType::_2f),
-                UniformName::new("u_radius", UniformType::_1f),
-                UniformName::new("u_glyph", UniformType::_1f),
+                UniformName::new("u_size", UniformType::_1f),
                 UniformName::new("u_rot", UniformType::_1f),
+                UniformName::new("u_uv_off", UniformType::_2f),
+                UniformName::new("u_cov", UniformType::_2f),
+                UniformName::new("u_progress", UniformType::_2f),
+                UniformName::new("u_axis", UniformType::_4f),
+                UniformName::new("u_origin", UniformType::_2f),
+                UniformName::new("u_extent", UniformType::_2f),
+                UniformName::new("u_bloom", UniformType::_1f),
             ],
-            &["cursor_glyph_atlas"],
+            &["tex_disk", "tex_ring", "tex_triangle", "tex_trail"],
         )
         .map_err(|err| {
             warn!("error compiling cursor_effect shader: {err:?}");
         })
         .ok();
 
-        // 字形图集：白字黑底的 BGRA（Argb8888）位图，格间留 1px 防串字。
-        let glyphs = crate::cursor_effect::glyphs::atlas_bgra();
-        let cursor_effect_atlas = renderer
-            .import_memory(
-                &glyphs,
-                Fourcc::Argb8888,
-                Size::from((
-                    crate::cursor_effect::glyphs::ATLAS_W as i32,
-                    crate::cursor_effect::glyphs::ATLAS_H as i32,
-                )),
-                false,
-            )
+        // 四张内嵌材质纹理（上游 LZ4 块，解码到 RGBA8 后上传）。
+        let cursor_effect_textures = crate::cursor_effect::render::upload_textures(renderer)
             .map_err(|err| {
-                warn!("error creating cursor_effect glyph atlas: {err:?}");
+                warn!("error creating cursor effect textures: {err:?}");
             })
             .ok();
 
@@ -207,7 +207,7 @@ impl Shaders {
             gradient_fade,
             blur,
             cursor_effect,
-            cursor_effect_atlas,
+            cursor_effect_textures,
             custom_resize: RefCell::new(None),
             custom_close: RefCell::new(None),
             custom_open: RefCell::new(None),

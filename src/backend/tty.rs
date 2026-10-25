@@ -1888,17 +1888,12 @@ impl Tty {
     ) -> RenderResult {
         let span = tracy_client::span!("Tty::render");
 
-        // 光标特效：每个渲染帧推进一步粒子状态机。
-        // 返回 true 表示仍有存活粒子 —— 由 `has_work()` 让该 output 即便
-        // 没有其它 damage 也持续出帧（见 Niri::queue_redraw 的动画判断）。
+        // 光标特效：每个渲染帧推进一步粒子模拟。
+        // 返回 true 表示模拟仍激活 —— 由 `has_work()` 让该 output 即便没有其它
+        // damage 也持续出帧（见 Niri::queue_redraw 的动画判断）。
         let cursor_effect_alive = niri.advance_cursor_effect(Instant::now());
         if cursor_effect_alive {
-            tracing::trace!(
-                waves = niri.cursor_effect.waves.len(),
-                sparks = niri.cursor_effect.sparks.len(),
-                trail = niri.cursor_effect.trail.len(),
-                "cursor-effect alive"
-            );
+            tracing::trace!("cursor-effect alive");
         }
 
         let mut rv = RenderResult::Skipped;

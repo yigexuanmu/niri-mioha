@@ -5486,12 +5486,8 @@ impl Niri {
             );
         }
 
-        // 光标特效：在光标之上绘制粒子（爆裂 / 火花 / 拖尾 / 滚轮圆环）。
+        // 光标特效：在光标之上绘制粒子（爆裂圆盘 / 溶解环 / 三角碎片 / 拖尾）。
         // 环境过滤：全屏窗口下隐藏、纯桌面（无窗口）下可按配置隐藏。
-        let output_loc = output.current_location().to_f64();
-        // 抗锯齿半像素（物理像素）：软边 = 2*aa = 1px，与 Canvas2D
-        // `ctx.stroke()` 的硬件 AA 观感一致。
-        let aa = 0.5;
         let (hide_in_fullscreen, show_on_desktop) = {
             let ce = &self.config.borrow().cursor_effect;
             (ce.hide_in_fullscreen, ce.show_on_desktop)
@@ -5514,13 +5510,24 @@ impl Niri {
                 should_render = false;
             }
         }
+        // 特效坐标是「输出本地物理像素」，只有指针所在的那块屏才画，
+        // 否则多显示器下每块屏都会画出同一份特效。
+        if should_render {
+            let output_geometry = self.global_space.output_geometry(output).unwrap();
+            match crate::cursor_effect::output_local_pointer(self, global_pos) {
+                Some((_, viewport)) if output_geometry.to_f64().contains(global_pos) => {
+                    // 顺手同步视口，保证模拟与渲染用的是同一份尺寸。
+                    self.cursor_effect.set_viewport(viewport);
+                }
+                _ => should_render = false,
+            }
+        }
         if should_render {
             for elem in crate::cursor_effect::render::collect_render_elements(
                 renderer,
                 &self.cursor_effect,
-                output_loc,
+                Instant::now(),
                 output_scale.x as f32,
-                aa,
             ) {
                 push(elem.into());
             }
