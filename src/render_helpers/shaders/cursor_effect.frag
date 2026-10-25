@@ -97,13 +97,25 @@ const float DISK_SHAPE_RADIUS = 0.879;
 /// 那圈近白的 (226,239,255) 是两道溶解环本体，不是圆盘的辉光。早先把这段也算
 /// 进圆盘，反解出一个 4px 的「白热核心」，结果盘边糊成一圈厚厚的白环 ——
 /// 而真正的环反倒被盖住了。
-const float DISK_HALO_NEAR_LEN = 12.0;
-const float DISK_HALO_FAR_LEN = 33.0;
+///
+/// 早期那组 (12 / 33, 增益 0.250 / 0.215) 是拿**未扣背景**的参考像素直接拟合的，
+/// 而官方图是一张真实桌面截图（背景约 (5,8,20)，且不均匀）。扣掉局部背景后重扫，
+/// 那组在中远场亮 2~5 倍 —— 这就是「整体颜色怪、没有蔚蓝发光」的来源：蓝雾太厚，
+/// 把本该透出来的深色桌面糊成一片青。
+///
+/// 现按扣背景后的目标剖面重新扫描（见 `fitdisk.py`，4 组候选里误差最小的一组）：
+const float DISK_HALO_NEAR_LEN = 9.0;
+const float DISK_HALO_FAR_LEN = 22.0;
 /// 两段的增益。口径是 `glow_shape`：`bloom_linear` 还要再乘
-/// `glow_source * u_bloom`，而圆盘固定是 `u_intensity = 2.4`、`u_bloom = 0.25`，
-/// 所以 0.6 × 增益 = 剖面里的线性蓝通道。
-const float DISK_HALO_NEAR_GAIN = 0.250;
-const float DISK_HALO_FAR_GAIN = 0.215;
+/// `glow_source * u_bloom`，而圆盘固定是 `u_intensity = 2.4`、`u_bloom = 0.25`。
+const float DISK_HALO_NEAR_GAIN = 0.160;
+const float DISK_HALO_FAR_GAIN = 0.075;
+/// 外晕往白里提的比例。扣背景后官方图外晕的三通道比例稳定在 R:G:B ≈
+/// (0.60 : 0.68 : 1.0)，比作者蓝 (0.241 : 0.391 : 1.0) 白得多 —— 上游 bloom 的
+/// `whiteCore` 补偿会把亮核的弱通道抬向峰值，mip 链把这份「发白」摊到整片外晕。
+/// 按目标比例反解线性域需要 (0.461 : 0.567 : 1.0)，对作者蓝混白 0.29 同时对上
+/// R / G 两个通道。
+const float DISK_HALO_WHITE_MIX = 0.29;
 /// 远场在四边形内部平滑归零（1080p 参考像素）。`render.rs` 的 `DISK_HALO_PX`
 /// 必须与它一致，否则光晕会被四边形切出一道直边。
 const float DISK_HALO_END = 160.0;
@@ -280,7 +292,7 @@ void main() {
         float disk_edge_px =
             (length(pixel - u_center) - DISK_SHAPE_RADIUS * half_px) / ref_scale;
         float disk_out = max(disk_edge_px, 0.0);
-        glow_source = disk_azure * u_intensity;
+        glow_source = mix(disk_azure, vec3(1.0), DISK_HALO_WHITE_MIX) * u_intensity;
         float disk_halo = DISK_HALO_NEAR_GAIN * exp(-disk_out / DISK_HALO_NEAR_LEN)
             + DISK_HALO_FAR_GAIN * exp(-disk_out / DISK_HALO_FAR_LEN);
         disk_halo *= 1.0 - smoothstep(
