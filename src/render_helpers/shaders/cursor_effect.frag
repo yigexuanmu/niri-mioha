@@ -358,7 +358,7 @@ const float RING_HOLE_WIDE_SCALE = 0.12;
 /// **只压本体，不压雾**：远场雾的能量口径是 `glow_source = u_color * u_intensity`，
 /// 与这一支无关；参考帧环外的近场反而比我们亮（1.05R 处线性富余 3.52 对
 /// 1.24），所以本体压暗省下来的「观感预算」要还给 `RING_EDGE_GAIN`。
-const float RING_EMISSION_SCALE = 0.20;
+const float RING_EMISSION_SCALE = 1.00;
 /// 环**雾**的源色去饱和量（0 = 纯顶点蓝，1 = 纯白）。
 ///
 /// 上游的 bloom 是对**已经过色调映射的整帧**做卷积，环核在那一帧里是白的
