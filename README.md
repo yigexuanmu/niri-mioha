@@ -23,17 +23,25 @@ yigexuanmu/niri-mioha         ← 本仓库，只加光标特效与按键行为�
 - **液态玻璃（liquid glass）已彻底移除**：旧 `Niri-glass` 的玻璃补丁集
   （`liquid_glass.rs`、`lg_*` uniform、`clipped_surface.frag` 里的折射/泛光代码、
   `appearance` 里的 `LiquidGlass` 配置）全部不存在，仓库里 grep 不到任何 `glass`。
-- **保留本分支独有功能**：光标粒子特效，实现参考 [BASpark](https://github.com/DoomVoss/BASpark)，
+- **保留本分支独有功能**：光标点击特效，实现参考 [BASpark](https://github.com/DoomVoss/BASpark)，
   全部用 GLES 在合成器内绘制，不依赖外部程序。
 
 ## 相对上游的两处本地改动
 
-### 1. 光标粒子特效（本分支主要亮点）
+### 1. 光标点击特效（本分支主要亮点）
 
-参考 BASpark 实现的矢量粒子特效，渲染成**代码字符**（系统字体栅格化到 atlas，
-配合稳定的伪随机种子，每次点击的字符、速度、半径、淡出时间都不同）。
+参考 BASpark 的 BA 点击特效：点击时出现**蓝色圆盘 + 溶解环 + 三角碎片**，按住拖动留下**光带拖尾**，
+每个元素都带一层解析近似的 Bloom 光晕。所有形状是矢量绘制，不再依赖字体栅格化。
 
-<details><summary>[展开/收起] 效果预览</summary>
+效果要素：
+
+- **圆盘**：点击位置的实心蔚蓝盘，生命周期内自发光向边缘渐亮，随后淡出。
+- **溶解环**：从盘边扩出的细白环，随时间溶解成断点和新月弧；内侧有一层柔光，盘退场后仍可见。
+- **三角碎片**：从点击点向外飞溅的青色三角形，颜色随生命期由白转青再淡出。
+- **拖尾**：按住鼠标拖动产生的光带，带近场亮边与远场残尾，颜色沿笔画方向渐变。
+- **光晕**：每个元素外侧的 Bloom 近似，由解析高斯 mip 链构成，不使用 HDR 帧缓冲（niri 不支持 HDR）。
+
+<details><summary>[展开/收起] 旧版本效果预览</summary>
 <br>
 
 - 左键
@@ -56,62 +64,83 @@ yigexuanmu/niri-mioha         ← 本仓库，只加光标特效与按键行为�
 
 <img width="960" alt="滚轮向上（绿色逆时针）" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E6%BB%91%E8%BD%AE%E5%90%91%E4%B8%8A.gif" />
 
-- 滚轮粒子数量与滚动速度关联
-
-<img width="960" alt="滑轮粒子效果与速度关联" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E6%BB%91%E8%BD%AE%E7%B2%92%E5%AD%90%E6%95%88%E6%9E%9C%E5%92%8C%E6%BB%91%E8%BD%AE%E9%80%9F%E5%BA%A6%E7%9A%84%E5%85%B3%E8%81%94.gif" />
-
 - 拖尾
 
 <img width="960" alt="拖尾" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E6%BB%91%E5%8A%A8.gif" />
 
 </details>
 
-#### 点击爆裂
-
-- 左键：**蓝色**（配置 `color`）
-- 右键：**浅红色**
-- 中键：**浅黄色**
-- 每种按键的爆裂各自保存颜色快照，可同时在不同位置渲染，互不覆盖
-- 圆盘 + 外圈环由代码字符组成，每字符独立的大小 / 速度 / 淡出窗口 → 逐个不规则消失
-- 中键长按同样会出拖尾
-
-#### 滚轮代码圆环
-
-- 滚轮**向下**：淡**橙**色圆环**顺时针**旋转
-- 滚轮**向上**：淡**绿**色圆环**逆时针**旋转
-- 旋转速度跟随滚轮滚动的快慢（按位移量比例注入）
-- 转动时从环缘沿切向**甩出火花**，力度随机散布
-- 圆环在可见期间始终**跟随光标**；停止滚动后惯性旋转片刻，再逐个字符淡出消失
-
-#### 拖尾
-
-- 按住鼠标拖动产生密集代码字符拖尾（~2px 采样）
-- 拖尾火花淡出较慢，点击火花淡出较快
-
 #### 配置
 
-在 niri 配置里添加 `cursor-effect { ... }` 块（全部可选，缺省取默认值）：
+在 niri 配置里添加 `cursor-effect { ... }` 块。所有字段可选，缺省取默认值；
+长度单位是 **1080p 参考像素**，时间单位是毫秒。
 
 ```kdl
 cursor-effect {
-    enabled true                     // 总开关（默认 true）
-    scale 1.5                        // 特效缩放（默认 1.5）
-    opacity 1.0                      // 整体不透明度（默认 1.0）
-    color "45,175,255"               // 左键爆裂颜色，R,G,B 或 #rrggbb（默认 "45,175,255"）
-    effect-speed 1.0                 // 动画速度基准（默认 1.0）
-    use-linked-animation-speed true  // 拖尾/点击共用 effect-speed（默认 true）
-    trail-speed 1.0                  // 拖尾速度（use-linked 时被忽略）
-    click-speed 1.0                  // 点击速度（use-linked 时被忽略）
-    trail-refresh-rate 40            // 拖尾采样频率 Hz（默认 40）
-    enable-always-trail false        // 不按键也常显拖尾（默认 false）
-    apply-curve-draw false           // 拖尾曲线平滑（默认 false）
-    click-trigger "both"             // 哪些按键触发爆裂：left / right / both（默认 left）
-    enable-middle-click-trigger true // 中键是否触发（默认 true）
-    hide-in-fullscreen true          // 全屏时隐藏特效（默认 true）
-    show-on-desktop true             // 桌面上显示特效（默认 true）
-    touch-mode false                 // 触摸屏模式（默认 false）
+    enabled true                      // 总开关，也可用 toggle-cursor-effect 动作运行时切换
+    scale 1.5                         // 整体缩放，1.0 = 上游原尺寸
+    opacity 1.0                       // 整体不透明度
+    tint "255,255,255"                // 每通道颜色倍率：R,G,B / #rrggbb / rgb(...)，白色保持原色
+    color "45,175,255"                // 仅兼容 BASpark 旧配置，不影响渲染，改色请用 tint
+
+    use-linked-animation-speed true   // true：拖尾与点击共用 effect-speed
+    effect-speed 1.0
+    trail-speed 1.0                   // use-linked 为 false 时生效
+    click-speed 1.0                   // use-linked 为 false 时生效
+    trail-refresh-rate 40             // 拖尾采样频率 Hz，0 = 每次运动事件都采样
+    enable-always-trail false         // 不按键也常显拖尾
+    apply-curve-draw false            // 拖尾用 Catmull-Rom 曲线而非直线段
+
+    click-trigger "left"              // left / right / both
+    enable-middle-click-trigger true  // 中键是否触发
+    // trigger-buttons "left" "middle" // 显式触发键列表，覆盖上面两行；支持
+                                      // left/right/middle/back/forward/side/extra/task
+                                      // 空节点 trigger-buttons 表示只留拖尾、不触发爆裂
+
+    hide-in-fullscreen true           // 全屏窗口上隐藏
+    show-on-desktop true              // 空工作区（桌面）上显示
+    touch-mode false                  // 触摸屏模式
+
+    disk {                            // 中心圆盘
+        radius 64.8
+        lifetime 200
+    }
+    rings {                           // 溶解环
+        count 2
+        lifetime 600
+        radius-min 68.93
+        radius-max 80.41
+        spin 11.17
+        spin-direction -1             // 1 或 -1，0 冻结
+        inner-ratio 0.9401275         // 越接近 1 越细
+        hdr-intensity 5.992157        // >1 会过曝成 bloom
+    }
+    shards {                          // 点击飞溅的三角碎片（拖尾碎片由 trail 控制）
+        count 4
+        lifetime-min 600
+        lifetime-max 700
+        radius 49.88
+        speed-min 49.88
+        speed-max 66.5
+        size-min 16.63
+        size-max 33.25
+        hdr-intensity 5.992157
+    }
+    trail {                           // 光带拖尾
+        width 1.0
+        opacity 1.0                   // 0 关闭拖尾但保留点击爆裂
+        length 1.0
+    }
+    glow {                            // 各元素的光晕（上游 Bloom 的解析近似）
+        gain 1.0                      // 0 关闭光晕，只留实体形状
+        radius 1.0
+        trail-gain 1.0
+    }
 }
 ```
+
+五个子块 `disk` / `rings` / `shards` / `trail` / `glow` 各最多出现一次，只写需要改的字段即可。
+把某个 `count` 或 `opacity` 设为 `0` 可以单独去掉那个元素。
 
 #### 开关快捷键
 

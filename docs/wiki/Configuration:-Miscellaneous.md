@@ -265,8 +265,9 @@ animations {
 
 <sup>Since: 26.04 (fork)</sup>
 
-Cursor particle effects: click bursts, a trail while dragging, and rings on scroll. The compositor
-draws them itself with GLES as code glyphs, so no external program is needed.
+Cursor click effects: a disk, dissolve rings and triangular shards on click, plus a light trail
+while dragging. The compositor draws them itself with GLES as vector shapes with an analytic
+bloom approximation, so no external program is needed.
 
 Every setting is optional; the defaults are shown below.
 

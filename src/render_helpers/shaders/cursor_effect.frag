@@ -110,7 +110,7 @@ const float RING_INNER_RATIO = 0.9401275;
 /// 纹理的径向 alpha 剖面本身是平的（227…255…231，只在两端各掉 10%），所以
 /// 加宽不会把环带拉灰，只是把同一段渐变摊到更宽的径向区间上。0.03 相当于
 /// inner 0.9401 → 0.9101、带宽 6% → 9%，在 1080p 参考系里是 4.8px → 7.2px。
-const float RING_THICKEN = 0.03;
+const float RING_THICKEN = 0.035;
 /// 环带**内外两条边**的径向羽化半宽（1080p 参考像素）。
 ///
 /// 环带原来只有 `aa_coverage` 的 1px 抗锯齿：1600p 下剖面是 111 → 199 → 206
@@ -120,7 +120,19 @@ const float RING_THICKEN = 0.03;
 ///
 /// 2.2px 是把参考那条斜坡反解出来的半宽：环带本身 7px 宽，两侧各吃掉 2px
 /// 之后中间还剩 3px 实心核，正好对上参考里那条 3px 的白线。
-const float RING_EDGE_SOFTNESS = 2.2;
+const float RING_EDGE_SOFTNESS = 1.2;
+/// 环带覆盖度的提升系数。
+///
+/// 环的`materialCoverage`直接取纹理 alpha（上游 `DissolvePixel` 就是这么写的），
+/// 而这张 `dissolve_ring` 的 alpha 沿角向是一条 6…248 的溶解梯度 —— 大部分角度
+/// 只到 0.85 左右。覆盖率 0.85 意味着环带里**掺了 15% 的蓝盘**：
+/// `0.85×白 + 0.15×(111,170,255) = (233,243,255)`，读起来是一根浅青色的细线，
+/// 而不是参考里那条纯白带（实测参考帧白环 `(255,255,255)`，宽 6px 且绕满一圈）。
+///
+/// 参考帧之所以是纯白，是因为上游的 bloom 又在它上面叠了一层加法光。我们没有
+/// 逐帧卷积，就把这层能量折进覆盖度里：乘 1.25 后典型角度落到 0.98 以上，
+/// 环带成为实心白；溶解掉的那一段（alpha 6~26）乘完仍在 0.03 以下，缺口形状不变。
+const float RING_COVERAGE_BOOST = 1.25;
 /// 网格 uv 留出的半像素边距（`firstU/lastU/innerV/outerV` 取 0.0005..0.9995）。
 const float RING_UV_INSET = 0.0005;
 const float RING_UV_SPAN = 0.999;
@@ -325,7 +337,7 @@ const float DISSOLVE_SOFTNESS = 0.02;
 /// 那一支（8 / 20 / 43px 三点分别 +14% / −8% / +14%），所以不动它，只把
 /// 近似方式从「两根指数」换成真核。
 const float RING_GLOW_SIGMA_MAX = 44.0;
-const float RING_GLOW_GAIN = 0.007;
+const float RING_GLOW_GAIN = 0.016;
 /// 环带外**中远场**那一圈柔光（σ 24~96，掐掉近场三级）。
 ///
 /// 参考帧的环是「一条 4~7px 的细线 + 外面 30px 才收干净的柔光」。整条 mip 链
@@ -334,7 +346,7 @@ const float RING_GLOW_GAIN = 0.007;
 ///
 /// 拆成两支之后：近场由 `RING_GLOW_GAIN`（整链）负责，远场由这一支
 /// （`bloom_mip_band(24, 96)`）负责，两个尺度各自标定。洞内那一侧按 0.5 倍给。
-const float RING_WIDE_GAIN = 0.017;
+const float RING_WIDE_GAIN = 0.0136;
 /// 洞内柔光相对环外的比例。
 ///
 /// **0.5 → 0.12**：参考帧 `17-27-14`（盘在、环在）的盘面从盘心到 0.85R 是平的
@@ -405,23 +417,16 @@ const float RING_GLOW_ANGULAR_SOFTNESS = 0.30;
 /// 位置是 0.242 / 0.152 / 0.113。三点比值 0.56 / 0.45 / 0.27 —— 洞内既暗一些
 /// 也收得更急，σ 比外支（96）小一档正好对上。
 ///
-/// **不要再用「压小洞内支去换盘面干净」这条思路。** 盘现在排在环的雾**之上**
-/// （`render.rs` 的 `draw_rank`），盘在的时候这支雾本来就被盘本体盖住了 ——
-/// 盘面那条朝环边提亮的曲线由 `DISK_HOLE_LEAK_GAIN` 单独负责。把这支压到
-/// 0.009 / σ12 的后果不是「盘面更干净」，而是**盘一消失洞里就全黑**：实机截图
-/// 里环内沿内是一整块纯黑，外侧却有明显雾，就是这支被压没了（盘的生命周期比
-/// 环短，后半段只剩环，洞内全靠它）。
+/// 内雾需要按相位分强弱：盘仍在时环雾是加法叠层，过强会把盘面抬成
+/// 斜坡；盘退场后洞内又完全依靠这一支提供柔光，不能继续沿用早期的低增益。
 const float RING_HOLE_SIGMA_MAX = 18.0;
-/// 0.05332 → 0.018：**盘还在的时候**这支是直接加法叠在盘面上的。原值是按
-/// 「只有环」的 `17-27-11` 标定的（那里洞内本来就该有 0.135 的富余），可是
-/// 盘的生命期（0~200ms）里它会把整片盘面抬成一条上扬的坡：
-/// 1600p t=120ms 实测 0.6R 处已是盘心的 1.40 倍、0.8R 处 2.79 倍，而参考帧
-/// `17-27-01` 同一批位置是 1.06 / 1.17 —— 盘心到 0.85R 基本是平的。
-/// 观感就是「蓝盘自己在发光」，环带外缘直接焊死在盘边，看不出细白线。
-///
-/// 环消失后洞里剩的雾仍然由这支提供，0.018 在盘退场（200ms 之后）只比原值
-/// 暗 1/3，`17-27-11` 那种「洞里一片哑光」还在。
-const float RING_HOLE_GAIN = 0.008;
+/// 盘退场后的洞内柔光增益。参考剖面的原始标定值是 0.05332；实机
+/// 观感偏亮，收至 0.035，只补一层能读出但不过发白的光。
+const float RING_HOLE_GAIN = 0.035;
+/// 盘还在时只保留少量内雾，避免把平坦的盘面抬成朝环边倾斜的亮坡。
+/// 使用处会随溶解阈值平滑插值到 `RING_HOLE_GAIN`，因此盘退场后洞里
+/// 不会再因为全程沿用低增益而变成纯黑。
+const float RING_HOLE_EARLY_GAIN = 0.008;
 /// （`RING_GLOW_END` 截断窗已删，理由同 `DISK_HALO_END`：σ=96 的高斯尾巴在
 /// 86px 处还有 1.7%，窗在 86→108px 一刀压到 0，实机就是雾上那圈弧形暗边。
 /// 四边形留白放大到 `RING_HALO_PX` 190px，残差 <1/255。）
@@ -562,14 +567,17 @@ const float TRI_GLOW_GAIN = 0.045;
 
 /// 碎片的直射亮度倍率。
 ///
-/// 上游把碎片当 HDR 发光体（`hdrIntensity = 5.992`），但那份 HDR 是**先过
-/// Unity 后处理的色调映射**才上屏的；我们这条链是直接预乘/加法进 8-bit 帧
-/// 缓冲，5.99 一乘，三通道全部削平成纯白，三角形就成了一块白板。
-///
-/// 参考帧 `17-27-01` 里碎片填色是 (150,240,255) —— 蓝通道打满、红只有 150，
-/// 也就是有效发射约 (0.30, 0.85, 1.0)。我们原样输出约 (1.0, 2.3, 3.3)，
-/// 按 0.30 缩放后正好落回参考那条曲线，三角形的青蓝过渡也就回来了。
-const float TRI_EMISSION_SCALE = 0.50;
+/// 上游把碎片当 HDR 发光体（`hdrIntensity = 5.992`），但那份 HDR 先经过
+/// Unity 的色调映射才上屏；我们这条链直接进入 8-bit 帧缓冲，原样输出会让
+/// 三个通道一起削平，三角形因此变成灰白。这里保留 0.80 的亮度，再由下面的
+/// `TRI_SATURATION` 把红通道从峰值中拉回，兼顾亮度和青色饱和度。
+const float TRI_EMISSION_SCALE = 0.80;
+/// 碎片覆盖度的封顶倍率（见使用处）。
+const float TRI_COVERAGE_BOOST = 1.15;
+/// 碎片发射的色饱和倍率（见使用处）。
+const float TRI_SATURATION = 1.16;
+/// 青色阶段绿通道的 SDR 补偿（夹回原峰值，白色阶段不受影响）。
+const float TRI_GREEN_GAIN = 1.28;
 /// （`TRI_GLOW_END` 截断窗已删：原来的 35→44px 淡出是在雾还有 ~3% 峰值时下刀，
 /// 碎片外面那圈看得见的硬壳就是它。交给 σ=24 的核自然收尾即可。）
 
@@ -920,7 +928,10 @@ void main() {
         float ring_soft = smoothstep(
             0.0, RING_EDGE_SOFTNESS * ref_scale, ring_edge_distance);
         float ring_opacity = material_alpha * dissolve;
-        float material_coverage = ring_opacity * ring_coverage * ring_soft;
+        float material_coverage = clamp(
+            ring_opacity * ring_coverage * ring_soft * RING_COVERAGE_BOOST,
+            0.0,
+            1.0);
         emission = srgb_to_linear(texel.rgb)
             * u_color
             * u_intensity
@@ -1003,8 +1014,12 @@ void main() {
         // 距离上做混合，所以不会出现「把两个距离搅在一起」的怪形状）。
         float w_out = smoothstep(inner, outer, radius);
         glow_source = mix(u_color, vec3(1.0), RING_GLOW_DESAT) * u_intensity;
+        float ring_hole_gain = mix(
+            RING_HOLE_EARLY_GAIN,
+            RING_HOLE_GAIN,
+            smoothstep(0.02, 0.25, u_threshold));
         float ring_halo = mix(
-            RING_HOLE_GAIN * bloom_mip(d_in, RING_HOLE_SIGMA_MAX)
+            ring_hole_gain * bloom_mip(d_in, RING_HOLE_SIGMA_MAX)
                 + RING_WIDE_GAIN * RING_HOLE_WIDE_SCALE
                     * bloom_mip_band(d_in, 48.0, 96.0)
                 + RING_EDGE_GAIN * bloom_mip(d_in, RING_EDGE_SIGMA),
@@ -1042,13 +1057,36 @@ void main() {
             * step(uv.x, cell_max.x)
             * step(cell_min.y, uv.y)
             * step(uv.y, cell_max.y);
-        float material_coverage = texel.a * u_color_a;
+        // 覆盖率提升：碎片填色的上限就是 `coverage`（收尾的容量压缩把
+        // `encoded×capacity` 夹在 alpha 上），而图集那格的 alpha 只到 0.87 ——
+        // 绿通道再怎么加亮也只能到 0.87×255 = 222，参考帧却是 (146,250,254)。
+        // 乘 1.15 封顶后绿/蓝能打满，红通道由下面的饱和度补偿控制。
+        float material_coverage = clamp(
+            texel.a * u_color_a * TRI_COVERAGE_BOOST,
+            0.0,
+            1.0);
         emission = srgb_to_linear(texel.rgb)
             * u_color
             * u_intensity
             * TRI_EMISSION_SCALE
             * material_coverage
             * global_opacity;
+        // 碎片的**色饱和**补偿。
+        //
+        // 上游是 HDR + Unity 色调映射：`(0.2, 0.42, 0.54) × 5.99` 在 HDR 里
+        // 是 (1.2, 2.5, 3.2)，曲线压回 SDR 时只有绿蓝顶到白点、红通道还留在
+        // 0.28 —— 参考帧碎片因此是 (146,250,254) 这种「蓝绿打满、红很低」的
+        // 青。我们这条链没有 HDR：三通道一起被削平，碎片就成了灰白板。
+        //
+        // 所以按峰值做一次反向 mix（>1 是**提高**饱和度，和拖尾相反）：把红
+        // 通道从峰值那份「白」里拉回来，绿蓝保持打满。对灰色阶段（作者色
+        // 三通道相等）lerp 不改变任何东西，不会把白碎片染青。
+        float tri_peak = max(emission.r, max(emission.g, emission.b));
+        emission = mix(vec3(tri_peak), emission, TRI_SATURATION);
+        // 参考青色阶段是绿、蓝接近打满而红保留在 146 左右。单调整体
+        // 饱和度无法同时满足这三个通道，因此只把绿通道推向原峰值；
+        // 白色阶段 G 本来就等于峰值，这里不会产生偏色。
+        emission.g = min(emission.g * TRI_GREEN_GAIN, tri_peak);
         coverage = material_coverage * global_opacity;
 
         // 辉光跟着**三角形**走，不是跟着外接圆走。
