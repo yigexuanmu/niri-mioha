@@ -304,6 +304,12 @@ pub fn ring_color(normalized_age: f32) -> Color {
     ))
 }
 
+/// 三角碎片的生命期配色：白 → 青 → 淡出。
+///
+/// 下面五个关键帧是上游 `simulation.cpp` 的 `triangleColor` **逐位原值**，不要在这里
+/// 做色相偏移。上游的“青”是靠“作者色 × 强度 5.992 → HDR → 色调映射”整条链出来的，
+/// 改关键帧会同时把雾的颜色（`glow_source = u_color`）和拖尾碎片一起带走。
+/// 曾经的四个本地补偿项（`TRI_SATURATION` 等）已删，直射色现在与上游逐项相同。
 pub fn triangle_color(normalized_age: f32) -> Color {
     const START: Color = Color::new(0.537_735_8, 0.537_735_8, 0.537_735_8, 1.0);
     const KEYS: [ColorKey; 5] = [

@@ -565,19 +565,18 @@ const float BLOOM_THRESHOLD = 1.0;
 const float TRI_GLOW_SIGMA_MAX = 24.0;
 const float TRI_GLOW_GAIN = 0.045;
 
-/// 碎片的直射亮度倍率。
+/// 碎片的直射色：`纹理 × 顶点色 × 强度 × 覆盖度`，**逐项与上游
+/// `AdditivePixel` 相同**，不在这里加任何补偿。
 ///
-/// 上游把碎片当 HDR 发光体（`hdrIntensity = 5.992`），但那份 HDR 先经过
-/// Unity 的色调映射才上屏；我们这条链直接进入 8-bit 帧缓冲，原样输出会让
-/// 三个通道一起削平，三角形因此变成灰白。这里保留 0.80 的亮度，再由下面的
-/// `TRI_SATURATION` 把红通道从峰值中拉回，兼顾亮度和青色饱和度。
-const float TRI_EMISSION_SCALE = 0.80;
-/// 碎片覆盖度的封顶倍率（见使用处）。
-const float TRI_COVERAGE_BOOST = 1.15;
-/// 碎片发射的色饱和倍率（见使用处）。
-const float TRI_SATURATION = 1.16;
-/// 青色阶段绿通道的 SDR 补偿（夹回原峰值，白色阶段不受影响）。
-const float TRI_GREEN_GAIN = 1.28;
+/// 这里原本有四个本地补偿项：`TRI_EMISSION_SCALE`(0.80)、
+/// `TRI_COVERAGE_BOOST`(1.15)、`TRI_SATURATION`(1.16)、`TRI_GREEN_GAIN`(1.28)。
+/// 它们都是为了让 8-bit 直出「更像」HDR + Unity 色调映射的观感，代价是碎片被
+/// 画成了另一颗东西：核心 (25, 231, 255)、不透明，而上游是浅青 (123, 239, 255)、
+/// alpha 只到图集那格的 0.87。既然目标是和上游一致，四项全部删掉。
+///
+/// 其中 `TRI_EMISSION_SCALE` 和文件末尾那套映射是重复补偿：上游的
+/// `hdrIntensity = 5.992` 之后本来就要走 `LinearToSrgb` + 容量压缩 + 10%
+/// bright-core，这一套本文件已经照搬，不需要提前再乘一次 0.80。
 /// （`TRI_GLOW_END` 截断窗已删：原来的 35→44px 淡出是在雾还有 ~3% 峰值时下刀，
 /// 碎片外面那圈看得见的硬壳就是它。交给 σ=24 的核自然收尾即可。）
 
@@ -1057,36 +1056,16 @@ void main() {
             * step(uv.x, cell_max.x)
             * step(cell_min.y, uv.y)
             * step(uv.y, cell_max.y);
-        // 覆盖率提升：碎片填色的上限就是 `coverage`（收尾的容量压缩把
-        // `encoded×capacity` 夹在 alpha 上），而图集那格的 alpha 只到 0.87 ——
-        // 绿通道再怎么加亮也只能到 0.87×255 = 222，参考帧却是 (146,250,254)。
-        // 乘 1.15 封顶后绿/蓝能打满，红通道由下面的饱和度补偿控制。
-        float material_coverage = clamp(
-            texel.a * u_color_a * TRI_COVERAGE_BOOST,
-            0.0,
-            1.0);
+        // 覆盖度：上游就是 `sampleValue.a * color.a`，不封顶也不抬。
+        // 图集那格的 alpha 只到 0.87，所以碎片本来就带一点透明，靠收尾的容量
+        // 压缩（`RGB ≤ alpha`）自然压暗 —— 上游实机也是这个亮度，不要在这里
+        // 补回去（曾经的 `TRI_COVERAGE_BOOST` 就是这一步，已删）。
+        float material_coverage = clamp(texel.a * u_color_a, 0.0, 1.0);
         emission = srgb_to_linear(texel.rgb)
             * u_color
             * u_intensity
-            * TRI_EMISSION_SCALE
             * material_coverage
             * global_opacity;
-        // 碎片的**色饱和**补偿。
-        //
-        // 上游是 HDR + Unity 色调映射：`(0.2, 0.42, 0.54) × 5.99` 在 HDR 里
-        // 是 (1.2, 2.5, 3.2)，曲线压回 SDR 时只有绿蓝顶到白点、红通道还留在
-        // 0.28 —— 参考帧碎片因此是 (146,250,254) 这种「蓝绿打满、红很低」的
-        // 青。我们这条链没有 HDR：三通道一起被削平，碎片就成了灰白板。
-        //
-        // 所以按峰值做一次反向 mix（>1 是**提高**饱和度，和拖尾相反）：把红
-        // 通道从峰值那份「白」里拉回来，绿蓝保持打满。对灰色阶段（作者色
-        // 三通道相等）lerp 不改变任何东西，不会把白碎片染青。
-        float tri_peak = max(emission.r, max(emission.g, emission.b));
-        emission = mix(vec3(tri_peak), emission, TRI_SATURATION);
-        // 参考青色阶段是绿、蓝接近打满而红保留在 146 左右。单调整体
-        // 饱和度无法同时满足这三个通道，因此只把绿通道推向原峰值；
-        // 白色阶段 G 本来就等于峰值，这里不会产生偏色。
-        emission.g = min(emission.g * TRI_GREEN_GAIN, tri_peak);
         coverage = material_coverage * global_opacity;
 
         // 辉光跟着**三角形**走，不是跟着外接圆走。
@@ -1100,7 +1079,7 @@ void main() {
         float tri_edge_px = sd_triangle(tri_p, TRI_V_APEX, TRI_V_BASE_L, TRI_V_BASE_R)
             * tri_half_px / (ref_scale * glow_radius);
         float tri_out = max(tri_edge_px, 0.0);
-        glow_source = u_color * u_intensity * TRI_EMISSION_SCALE;
+        glow_source = u_color * u_intensity;
         float tri_halo = TRI_GLOW_GAIN
             * bloom_mip(tri_out, TRI_GLOW_SIGMA_MAX);
         glow_shape = tri_halo;
