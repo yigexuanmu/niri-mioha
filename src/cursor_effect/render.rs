@@ -378,7 +378,7 @@ struct Base {
 /// 把环整层压到盘下面，结果环在 0~200ms（盘还实心的时候）被盘本体完全盖住，
 /// 实机就变成「点击只有蓝盘、没有光环」。
 ///
-/// **雾（glow_pass）默认垫在最底，本体压在雾上面** —— 唯一例外是环的雾。
+/// **雾（glow_pass）默认垫在最底，本体压在雾上面** —— 例外是环的雾和碎片的雾。
 ///
 /// 这是「漏光」的唯一正确解法，靠调增益是修不掉的。雾是 alpha=0 的纯加法，
 /// 本体是预乘 over：本体画在雾之上时，盘面按自己的 alpha 把雾**扣掉**，盘内
@@ -396,19 +396,27 @@ struct Base {
 /// 所以环的雾夹在盘本体之后、环本体之前。盘自己的雾不享受这个待遇：盘内那圈
 /// 亮度由本体自己的发射项（`DISK_RIM_*`）给，那是「自发光」，与雾无关。
 ///
-/// 顺序：盘雾 → 碎片雾 → 拖尾雾 → 拖尾 → 盘本体 → **环雾** → 环本体 → 碎片本体。
+/// **碎片是第二个例外**，而且是同一类问题：碎片从点击点向外飞，它的雾朝
+/// **圆心那一半**整个压在盘面、环带上。垫在最底会被盘本体（`alpha` ≈ 0.99）
+/// 按预乘 over 整片扣掉，实机看到的就是「每个碎片只有朝外那半圈雾，内侧没
+/// 渲染」。碎片与环同理：雾排到盘/环本体之后、碎片本体之前。
+///
+/// 顺序：盘雾 → 拖尾雾 → 拖尾 → 盘本体 → **环雾** → 环本体 → **碎片雾** →
+/// 碎片本体。
 fn draw_rank(material: Material, glow_pass: bool) -> u8 {
     match (material, glow_pass) {
         // 环的雾夹在盘本体与环本体之间（理由见上）。
         (Material::Ring, true) => 3,
-        // 其余三种雾合并成同一档铺在最底。
+        // 碎片的雾夹在环本体之后、碎片本体之前（理由见上）。
+        (Material::Triangle, true) => 5,
+        // 其余两种雾合并成同一档铺在最底。
         (_, true) => 0,
         // 上游把拖尾当连续笔画，先于所有点击粒子提交；但它自己发光，要压在
         // 雾上面（否则拖尾会被盘的雾整体加亮、边缘发糊）。
         (Material::Trail, false) => 1,
         (Material::Disk, false) => 2,
         (Material::Ring, false) => 4,
-        (Material::Triangle, false) => 5,
+        (Material::Triangle, false) => 6,
     }
 }
 
@@ -1624,24 +1632,29 @@ mod tests {
         if commands.iter().any(|c| c.material == Material::Triangle) {
             assert!(body(Material::Triangle) > body(Material::Ring));
         }
-        // 环的雾夹在盘本体与环本体之间；其余雾一律在本体之前铺底。
+        // 环的雾夹在盘本体与环本体之间；碎片的雾夹在环本体与碎片本体之间。
         let first_body = commands
             .iter()
             .position(|c| !c.glow_pass)
             .expect("至少有一个本体");
         for (idx, cmd) in commands.iter().enumerate() {
             if cmd.glow_pass {
-                if cmd.material == Material::Ring {
-                    assert!(
+                match cmd.material {
+                    Material::Ring => assert!(
                         idx > body(Material::Disk) && idx < body(Material::Ring),
                         "环的雾必须夹在盘本体与环本体之间，否则盘面那圈内光会丢"
-                    );
-                } else {
-                    assert!(
+                    ),
+                    // 碎片从点击点向外飞，雾朝圆心那半压在盘/环上；垫到它们下面
+                    // 就会被整片扣掉，只剩朝外那圈。
+                    Material::Triangle => assert!(
+                        idx > body(Material::Ring) && idx < body(Material::Triangle),
+                        "碎片的雾必须夹在环本体与碎片本体之间，否则朝圆心那半圈会丢"
+                    ),
+                    _ => assert!(
                         idx < first_body,
                         "{:?} 的辉光遍必须在本体之前，否则会糊在本体表面（漏光）",
                         cmd.material
-                    );
+                    ),
                 }
             }
         }
