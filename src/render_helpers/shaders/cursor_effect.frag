@@ -345,16 +345,8 @@ const float RING_GLOW_GAIN = 0.016;
 /// 先变肥的是贴边那三四像素（细线读成白管），远场始终是暗的。
 ///
 /// 拆成两支之后：近场由 `RING_GLOW_GAIN`（整链）负责，远场由这一支
-/// （`bloom_mip_band(24, 96)`）负责，两个尺度各自标定。洞内那一侧按 0.5 倍给。
+/// （`bloom_mip_band(24, 96)`）负责，两个尺度各自标定。内外两侧给同样的口径。
 const float RING_WIDE_GAIN = 0.0136;
-/// 洞内柔光相对环外的比例。
-///
-/// **0.5 → 0.12**：参考帧 `17-27-14`（盘在、环在）的盘面从盘心到 0.85R 是平的
-/// （107,167,255 → 124,179,255），洞内没有一圈 σ=24..96 的宽带雾。那圈宽带
-/// 只该在**盘退场之后**（`17-27-11`）才看得见，而盘在的时候它照样按加法叠上
-/// 去 —— 实测把盘心从 111 抬到 136、盘边抬到 177，整块盘读成「自己在发光的
-/// 蓝球」，环带又和盘边焊死，细白线彻底看不出来。
-const float RING_HOLE_WIDE_SCALE = 0.12;
 /// 环**本体**发射的压缩系数（1.0 = 上游 `hdrIntensity 5.992157` 原样）。
 ///
 /// 上游那份 HDR 是先过 Unity 后处理（曝光 + 色调映射）才上屏的；我们这里没有
@@ -382,51 +374,30 @@ const float RING_EMISSION_SCALE = 1.00;
 /// 0.55 让环带内外的近场雾跟着白核走（参考帧 1.0~1.15R 的色相是中性偏蓝），
 /// 远场那截仍由 `u_color` 的蓝撑着，不会整圈发灰。
 const float RING_GLOW_DESAT = 0.05;
-/// 环带**内侧**那层补光（往洞里渗）。旧实现这里是 `0.0`：环内侧一律不出雾，
-/// 于是环看起来只是一圈贴在圆盘上的白线，光全跑到外面去了。
-///
-/// 平台站 `17-27-11`（只有环、没有盘的那一帧）给出洞内的剖面：离环带内缘
-/// 4px 处线性富余 0.135、16px 处 0.068、30px 处 0.030；同一帧环**外**侧对应
-/// 位置是 0.242 / 0.152 / 0.113。也就是说洞内既暗一些（峰值 0.56 倍）也收得
-/// 更急（τ≈17px 对 τ≈33px）。所以内支单独给一组 τ，不用外侧那组。
 /// 环的辉光在**角向**上的软化半宽（Alpha 单位）。见使用处说明。
 const float RING_GLOW_ANGULAR_SOFTNESS = 0.30;
-/// **但 `17-27-11` 是「只有环」的帧，洞内是深色桌面。** `17-27-14`（满环 +
-/// 圆盘）里洞内是一条**平的**饱和蓝面（0~0.8R 恒 158~179），环内支只在
-/// 0.85R 之后才抬起来。把上面那组 τ 直接套到有盘的帧上，加法遍里雾从环内缘
-/// 一路铺到圆心，叠在 160 的盘面上 → 0.5R 处 183、0.75R 处已经饱和 255。
-/// 实测合成剖面（r/R 按环外半径归一）：
+/// 环雾角向卷积的采样档数（单侧）：`6` = 前后共 13 个点，覆盖 ±2σ。
+const int RING_GLOW_ANGULAR_TAPS = 6;
+/// 环雾角向卷积的核 σ（1080p 参考像素）。
 ///
-/// |    r/R   | 合成 sRGB | 其中来自环内支 | 参考站 17-27-14 |
-/// |---------:|----------:|---------------:|----------------:|
-/// |   0.25   |      167  |        +6      |          159    |
-/// |   0.50   |      183  |       +23      |          161    |
-/// |   0.75   |      255  |       +94      |          169    |
+/// 这里**不**取 pyramid 那个等效值（1080p + `diffusion 7` 算出来 ≈ 60px）：
+/// 环带半径只有 ≈ 57px，σ=60 意味着核在环带上看过去 ±2σ ≈ ±120°，缺口两侧
+/// 互相灌满 —— 实测 t=0.40 环带上的缺口已经填到峰值的 55~66%，实机就是
+/// 「光环那一圈都有雾」，看不到弧了。
 ///
-/// 于是整块圆盘都在发光，环带反而被洞内的强光淹没、轮廓看起来变薄 ——
-/// 即「中间的蓝色圆一起发光、光环变薄」。口径收到只留贴环带的一条窄边
-/// （τ 3.5 / 6px），洞内 17px 外的贡献降到 0.2/255 以下。
+/// 30 是把「跟着剩下的弧走」和「缺口不是硬切」两头的折中：Δθ 过渡宽 ≈ σ/R
+/// = 30/57 ≈ 30°，实测缺口是峰值的 9%（t=0.40）/ 46%（t=0.30，这时两道环
+/// 的弧共同覆盖了大半圈，本来就应该亮）。
+const float RING_GLOW_KERNEL_SIGMA = 30.0;
+/// 环带的雾**内外对称**，两侧共用「到环带的距离」和同一组增益 / σ。
 ///
-/// 下一轮若还嫌盘面亮，先把 `TRI_GLOW_NEAR_GAIN` 往下压 —— 洞内 0.5~0.72R
-/// 剩下的那点抬升是碎片的雾，不是这里的残尾（此处 0.75R 已经没有贡献）。
+/// 以前内侧是单独一支：`0.12×` 的宽带、`σ ≤ 18`、盘还在时只给 `0.008`
+/// 的增益（当时的理由是护住平坦的盘面，见 git 历史）。代价是环带内侧那圈雾
+/// 只剩外支的两三成，实机读成「雾只朝环外漏，环内贴着一道硬边」。
 ///
-/// 洞内支的 σ = **24px**（4 级），增益取外支的 **0.56 倍**。
-///
-/// 这两个数直接来自「只有环、没有盘」的那一帧 `17-27-11`：洞内离环带内缘
-/// 4px 处线性富余 0.135、16px 处 0.068、30px 处 0.030；同一帧环**外**侧对应
-/// 位置是 0.242 / 0.152 / 0.113。三点比值 0.56 / 0.45 / 0.27 —— 洞内既暗一些
-/// 也收得更急，σ 比外支（96）小一档正好对上。
-///
-/// 内雾需要按相位分强弱：盘仍在时环雾是加法叠层，过强会把盘面抬成
-/// 斜坡；盘退场后洞内又完全依靠这一支提供柔光，不能继续沿用早期的低增益。
-const float RING_HOLE_SIGMA_MAX = 18.0;
-/// 盘退场后的洞内柔光增益。参考剖面的原始标定值是 0.05332；实机
-/// 观感偏亮，收至 0.035，只补一层能读出但不过发白的光。
-const float RING_HOLE_GAIN = 0.035;
-/// 盘还在时只保留少量内雾，避免把平坦的盘面抬成朝环边倾斜的亮坡。
-/// 使用处会随溶解阈值平滑插值到 `RING_HOLE_GAIN`，因此盘退场后洞里
-/// 不会再因为全程沿用低增益而变成纯黑。
-const float RING_HOLE_EARLY_GAIN = 0.008;
+/// 上游的 bloom 是拿整张发光图做卷积：一条有厚度的带子卷完必然是「带内平顶
+/// + 内外两侧同一支单调衰减」，不会把其中一侧单独掐掉。所以这里删掉内支，
+/// 内外共用 `d_band`，径向完全对称。
 /// （`RING_GLOW_END` 截断窗已删，理由同 `DISK_HALO_END`：σ=96 的高斯尾巴在
 /// 86px 处还有 1.7%，窗在 86→108px 一刀压到 0，实机就是雾上那圈弧形暗边。
 /// 四边形留白放大到 `RING_HALO_PX` 190px，残差 <1/255。）
@@ -548,6 +519,28 @@ const float BLOOM_TRAIL_WHITE_MIX = 0.0;
 /// 上游 `FxBloomSettings::threshold`（默认 1.0，gamma）。Unity 的 bright pass 在
 /// **线性**域比较，`unityGammaToLinearChannel(1.0) == 1.0`，所以门槛就是线性 1.0。
 const float BLOOM_THRESHOLD = 1.0;
+
+/// 上游 prefilter 的亮部口径：`contribution = max(0, b - Threshold) / b`。
+///
+/// `Knee = 0`（`fx_bloom_settings.hpp`）时 `soft` 项恒为 0，于是
+/// `embedded_fx_shaders.hpp` 里的 `BrightPass` 就退化成这一行：
+///
+/// ```hlsl
+/// contribution = max(soft, brightness - Threshold) / max(brightness, 1e-4);
+/// return float4(color * contribution, brightness * contribution);
+/// ```
+///
+/// 卷积的是 `emission * contribution`，**不是** `emission` 本值。之前环/盘/碎片
+/// 三个分支都拿满值当雾源（等于按 contribution = 1 算），环核亮度 5.99 时雾比
+/// 上游高 20%；更差别在暗部：上游亮度不到 1.0 的像素根本不进 bloom，我们却
+/// 照样按形状铺雾（环溶解到尾段、碎片半透明边缘都会多一圈）。
+float bloom_contribution(vec3 linear_color) {
+    float brightness = max(linear_color.r, max(linear_color.g, linear_color.b));
+    return clamp(
+        (brightness - BLOOM_THRESHOLD) / max(brightness, 0.0001),
+        0.0,
+        1.0);
+}
 /// 三角碎片的光晕（1080p 参考像素，从**三角形边缘**起算）。
 ///
 /// 旧实现把碎片的雾做成「以图元中心为圆心、半径 0.45 半尺寸的高斯」—— 无论
@@ -854,6 +847,7 @@ void main() {
             (length(pixel - u_center) - DISK_SHAPE_RADIUS * half_px) / (ref_scale * glow_radius);
         float disk_out = max(disk_edge_px, 0.0);
         glow_source = mix(disk_azure, vec3(1.0), DISK_HALO_WHITE_MIX) * u_intensity;
+        glow_source *= bloom_contribution(glow_source);
         // 盘外那半支。`disk_out` 在盘内恒为 0、`bloom_mip(0)` 恒为 1，所以必须
         // 用贴边门控把盘内压掉 —— 否则整片盘面平白亮起一档（旧版是靠
         // `DISK_HALO_INSIDE_SCALE = 0` 做的同一件事，这里直接写进门控里）。
@@ -964,18 +958,56 @@ void main() {
         //
         // 按径向中线采样，得到的就是「这个角度上环还剩多少」：辉光因此跟着溶解
         // 前沿的角度变化走，而不会在环带内外断掉。
-        vec2 ring_mid_uv = ring_uv(pixel, mix(inner, outer, 0.5));
-        float ring_mid_alpha = texture2D(tex_ring, ring_mid_uv).a * u_color_a;
-        // 角向过渡必须比实体那条**宽得多**。
         //
-        // 实体用的是 `DISSOLVE_SOFTNESS`（0.02）—— 那是「边界上一个像素」的量级，
-        // 对实体正合适。但辉光是整条弧的能量摊开来的，缺口处应该是一段几十度
-        // 的渐变；照搬 0.02 会让辉光沿缺口边缘被一刀切开，从圆心射出一道硬邦邦
-        // 的黑色楔形（实测就是这样）。
-        element_opacity = smoothstep(
-            u_threshold - RING_GLOW_ANGULAR_SOFTNESS,
-            u_threshold,
-            ring_mid_alpha);
+        // **裁剪顺序不能反。** 上游是「先 `clip(materialCoverage - threshold)`
+        // 决定画不画，再对整帧发光图做卷积」。我们这里如果先对 alpha 做角向
+        // 平均、再进 `smoothstep`，等于把「没被溶解掉的亮弧」和「缺口里的暗
+        // 像素」先搅匀：中心附近算出个中间值，阈值一卡，还是把两侧切回硬边
+        // （实测 σ 从 48 拉到 200，洞内剖面一分没变，就是顺序错了）。
+        //
+        // 正确的做法是**逐采样点先裁剪、再按核加权**：每个采样点先算它自己
+        // 在不在剩下的弧里（`smoothstep`），再用它到当前像素的距离加权。这样
+        // 缺口处的雾就只能靠附近的弧「漏」过来，收尾宽度自然等于核宽 ——
+        // 和上游卷积同一个结果。
+        //
+        // 之前那个把它当成「像素自己角度的可见度」的写法，让缺口两侧直接
+        // 出现了两个死零扇区（t=0.40 实测洞内角向总量 0 / 72 交替，实机就是
+        // 一个规规整整的扇形暗块）。
+        float ring_mid_radius = mix(inner, outer, 0.5);
+        float ring_kernel_scale = ref_scale * glow_radius;
+        float ring_mid_ref = max(ring_mid_radius / ring_kernel_scale, 0.0001);
+        float radius_ref = radius / ring_kernel_scale;
+        // 采样点按角度均布，跨 ±2σ；σ 换算成弧度就是 σ / R。
+        float ring_ang_step = 2.0 * RING_GLOW_KERNEL_SIGMA / ring_mid_ref
+            / float(RING_GLOW_ANGULAR_TAPS);
+        vec2 ring_mid_off = pixel - u_center;
+        float ring_vis_sum = 0.0;
+        float ring_vis_weight = 0.0;
+        for (int i = -RING_GLOW_ANGULAR_TAPS; i <= RING_GLOW_ANGULAR_TAPS; i++) {
+            float delta = float(i) * ring_ang_step;
+            float cosine = cos(delta);
+            float sine = sin(delta);
+            vec2 tap = u_center + vec2(
+                cosine * ring_mid_off.x - sine * ring_mid_off.y,
+                sine * ring_mid_off.x + cosine * ring_mid_off.y);
+            float tap_alpha = texture2D(tex_ring, ring_uv(tap, ring_mid_radius)).a
+                * u_color_a;
+            // 采样点自己先过裁剪（硬裁 + 极窄过渡，语义与本体一致）。
+            float tap_visibility = smoothstep(
+                u_threshold - RING_GLOW_ANGULAR_SOFTNESS,
+                u_threshold,
+                tap_alpha);
+            // 权重按**实际距离**给（余弦定理：两边都是已知半径），不是按角度：
+            // 圆心附近所有采样点到像素等距，权重自动变成均匀 —— 整圈平均。
+            float tap_distance_sq = radius_ref * radius_ref + ring_mid_ref * ring_mid_ref
+                - 2.0 * radius_ref * ring_mid_ref * cosine;
+            float tap_weight = exp(
+                -max(tap_distance_sq, 0.0)
+                / (2.0 * RING_GLOW_KERNEL_SIGMA * RING_GLOW_KERNEL_SIGMA));
+            ring_vis_sum += tap_weight * tap_visibility;
+            ring_vis_weight += tap_weight;
+        }
+        element_opacity = ring_vis_sum / max(ring_vis_weight, 0.0001);
 
         // 环的雾按**到环带**的距离给，不是按「到外缘的距离」。
         //
@@ -998,34 +1030,15 @@ void main() {
         // 更暗的环」。上游的 bloom 是对整张发光图做卷积，一条有厚度的带子卷完
         // 只能得到**平顶 + 两侧单调衰减**，绝不会在带宽内部凹下去。
         //
-        // 所以两支共用同一个「到带的距离」，只在带子外面分岔（内侧用更短的 τ，
-        // 参考里洞内的光确实比环外收得急）。
+        // 所以两支共用同一个「到带的距离」，而且**不**在带子内外分岔：上游
+        // 卷积出来的一侧平顶加两侧单调衰减，不会把内侧单独收短。
         float d_band = max(max(inner - radius, radius - outer), 0.0)
             / (ref_scale * glow_radius);
-        float d_out = d_band;
-        float d_in = d_band;
-        // 内、外两支**平滑**混合，不再拿 `step` 在环带中线上硬切。
-        //
-        // 旧写法 `step(中线, radius)` 跨过中线时幅值从 0.12 跳到 1.0、衰减长度
-        // 从 3.5 跳到 7 —— 环带上凭空多出来一道接缝，半径扫过去会看到一圈硬
-        // 边。改成按半径在 `[inner, outer]` 上 smoothstep，两支各自求值后再插
-        // 值，整个径向域 C1 连续（环带内两支都取 1，插值只改变权重，不会在
-        // 距离上做混合，所以不会出现「把两个距离搅在一起」的怪形状）。
-        float w_out = smoothstep(inner, outer, radius);
         glow_source = mix(u_color, vec3(1.0), RING_GLOW_DESAT) * u_intensity;
-        float ring_hole_gain = mix(
-            RING_HOLE_EARLY_GAIN,
-            RING_HOLE_GAIN,
-            smoothstep(0.02, 0.25, u_threshold));
-        float ring_halo = mix(
-            ring_hole_gain * bloom_mip(d_in, RING_HOLE_SIGMA_MAX)
-                + RING_WIDE_GAIN * RING_HOLE_WIDE_SCALE
-                    * bloom_mip_band(d_in, 48.0, 96.0)
-                + RING_EDGE_GAIN * bloom_mip(d_in, RING_EDGE_SIGMA),
-            RING_GLOW_GAIN * bloom_mip(d_out, RING_GLOW_SIGMA_MAX)
-                + RING_WIDE_GAIN * bloom_mip_band(d_out, 48.0, 96.0)
-                + RING_EDGE_GAIN * bloom_mip(d_out, RING_EDGE_SIGMA),
-            w_out);
+        glow_source *= bloom_contribution(glow_source);
+        float ring_halo = RING_GLOW_GAIN * bloom_mip(d_band, RING_GLOW_SIGMA_MAX)
+            + RING_WIDE_GAIN * bloom_mip_band(d_band, 48.0, 96.0)
+            + RING_EDGE_GAIN * bloom_mip(d_band, RING_EDGE_SIGMA);
         // 雾必须**跟着溶解一起退**，不能只在最后被门控一刀关掉。
         //
         // 上面的 `element_opacity` 是 `smoothstep(threshold - 软宽, threshold, 中线alpha)`：
@@ -1080,8 +1093,16 @@ void main() {
             * tri_half_px / (ref_scale * glow_radius);
         float tri_out = max(tri_edge_px, 0.0);
         glow_source = u_color * u_intensity;
+        glow_source *= bloom_contribution(glow_source);
         float tri_halo = TRI_GLOW_GAIN
             * bloom_mip(tri_out, TRI_GLOW_SIGMA_MAX);
+        // 碎片内部（`tri_edge_px < 0`）取的是核的平顶，也就是 1.0 —— 和边界上
+        // 的外侧值相等，跨过轮廓不会断。
+        //
+        // 这一遍画在**本体之前**，本体 α ≈ 0.87 会把正下方的雾按预乘 over 乘成
+        // 13%；内侧那半靠本体自己盖着，看不出来。所以碎片全图最亮的位置以及
+        // “雾朝圆心那半圈”能否看到，全看 `render.rs` 的 `draw_rank` 把它排在哪
+        // —— 排在盘/环本体之下就会被它们整片扣掉（见那边的说明）。
         glow_shape = tri_halo;
     } else {
         // TrailPixel：发光不被覆盖度压暗，覆盖度只管 Alpha 与纵向淡出。
@@ -1345,11 +1366,12 @@ void main() {
             * u_intensity
             * particle_opacity
             * global_opacity;
-        float glow_brightness = max(fog_emission.r, max(fog_emission.g, fog_emission.b));
-        float glow_contribution = clamp(
-            (glow_brightness - BLOOM_THRESHOLD * 0.35) / max(glow_brightness, 0.0001),
-            0.0,
-            1.0);
+        // 和环/盘/碎片共用上游同一个亮部口径（`BrightPass`，threshold 1.0，
+        // Knee 0）。这里原本是 `BLOOM_THRESHOLD * 0.35` 的自造软膝，没有上游依据。
+        // 换过来对亮段几乎无影响（拖尾强度 23.97，`1 - 1/b` 与 `1 - 0.35/b`
+        // 只差 2.7%，8-bit 上实测整层零变化），差别只落在亮度 < 1.0 的尾段——
+        // 那正是上游「暗部不进 bloom」的地方。
+        float glow_contribution = bloom_contribution(fog_emission);
         glow_source = fog_emission * glow_contribution * BLOOM_TRAIL_SOURCE_SCALE;
         // ── 雾也必须「恰好画一次」 ────────────────────────────────────────
         //
