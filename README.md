@@ -118,19 +118,14 @@ cursor-effect {
 Mod+M hotkey-overlay-title="开关光标特效" repeat=false { toggle-cursor-effect; }
 ```
 
-### 2. 网格预览的开关改成普通按键绑定
+### 2. shorin-niri 网格预览的开关快捷键
 
-SHORiN niri 原本把「点击 Mod 键切换网格预览」硬编码在 `input/mod.rs` 里
-（`pending_default_mod_tap`），只受 `grid-overview { default-mod-action }` 控制，
-既不能改键也不能删掉。
-
-本分支把它改成**普通 binds 条目**，默认配置随附：
+配置项：
 
 ```kdl
 Mod repeat=false { toggle-grid-overview; }
 ```
 
-也就是默认行为不变，但可以像其它按键一样随意改键，或者删掉这行彻底关掉这个入口。
 `default-mod-action` 这个设置项已移除。
 
 ## 构建与使用
