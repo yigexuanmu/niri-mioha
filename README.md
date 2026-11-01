@@ -7,7 +7,7 @@
 
 ## 这个仓库是什么
 
-本仓库是**从 SHORiN niri 的最新 main 重新起底**建立的，不是旧 `Niri-glass` 分支的延续：
+本仓库是**从 SHORiN niri 的最新 main 重新起底**建立的，并以此为地基，增加了很多实验性功能：
 
 ```
 niri-wm/niri  (官方)          ← 持续 merge
@@ -23,14 +23,14 @@ yigexuanmu/niri-mioha         ← 本仓库，只加光标特效与按键行为�
 - **液态玻璃（liquid glass）已彻底移除**：旧 `Niri-glass` 的玻璃补丁集
   （`liquid_glass.rs`、`lg_*` uniform、`clipped_surface.frag` 里的折射/泛光代码、
   `appearance` 里的 `LiquidGlass` 配置）全部不存在，仓库里 grep 不到任何 `glass`。
-- **保留本分支独有功能**：光标点击特效，实现参考 [BASpark](https://github.com/DoomVoss/BASpark)，
+- **保留本分支独有功能**：光标点击特效，实现参考 [ba-click-fx-desktop](https://github.com/CialloKing/ba-click-fx-desktop)，
   全部用 GLES 在合成器内绘制，不依赖外部程序。
 
 ## 相对上游的两处本地改动
 
 ### 1. 光标点击特效（本分支主要亮点）
 
-参考 BASpark 的 BA 点击特效：点击时出现**蓝色圆盘 + 溶解环 + 三角碎片**，按住拖动留下**光带拖尾**，
+参考 ba-click-fx-desktop 的 BA 点击特效：点击时出现**蓝色圆盘 + 溶解环 + 三角碎片**，按住拖动留下**光带拖尾**，
 每个元素都带一层解析近似的 Bloom 光晕。所有形状是矢量绘制，不再依赖字体栅格化。
 
 效果要素：
@@ -40,35 +40,6 @@ yigexuanmu/niri-mioha         ← 本仓库，只加光标特效与按键行为�
 - **三角碎片**：从点击点向外飞溅的青色三角形，颜色随生命期由白转青再淡出。
 - **拖尾**：按住鼠标拖动产生的光带，带近场亮边与远场残尾，颜色沿笔画方向渐变。
 - **光晕**：每个元素外侧的 Bloom 近似，由解析高斯 mip 链构成，不使用 HDR 帧缓冲（niri 不支持 HDR）。
-
-<details><summary>[展开/收起] 旧版本效果预览</summary>
-<br>
-
-- 左键
-
-<img width="960" alt="左键爆裂" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E5%B7%A6%E9%94%AE.gif" />
-
-- 右键
-
-<img width="960" alt="右键爆裂" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E5%8F%B3%E9%94%AE.gif" />
-
-- 中键
-
-<img width="960" alt="中键爆裂" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E4%B8%AD%E9%94%AE.gif" />
-
-- 滚轮向下
-
-<img width="960" alt="滚轮向下（橙色顺时针）" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E6%BB%91%E8%BD%AE%E5%90%91%E4%B8%8B.gif" />
-
-- 滚轮向上
-
-<img width="960" alt="滚轮向上（绿色逆时针）" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E6%BB%91%E8%BD%AE%E5%90%91%E4%B8%8A.gif" />
-
-- 拖尾
-
-<img width="960" alt="拖尾" src="https://raw.githubusercontent.com/yigexuanmu/images/main/Niri-beta/%E6%BB%91%E5%8A%A8.gif" />
-
-</details>
 
 #### 配置
 
@@ -198,5 +169,5 @@ git merge shorin/main        # SHORiN 分支
 - 官方 niri：[niri-wm/niri](https://github.com/niri-wm/niri)
 - SHORiN 分支：[SHORiN-KiWATA/niri](https://github.com/SHORiN-KiWATA/niri)
 - 鼠标特效参考实现：[DoomVoss/BASpark](https://github.com/DoomVoss/BASpark)
-- 旧分支（液态玻璃版，已停止维护，代码已不在此仓库）：
+- 旧分支（液态玻璃实验室版，已停止维护，代码已不在此仓库）：
   [yigexuanmu/Niri-glass](https://github.com/yigexuanmu/Niri-glass)
