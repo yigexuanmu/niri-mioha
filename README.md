@@ -20,9 +20,6 @@ yigexuanmu/niri-mioha         ← 本仓库，只加光标特效与按键行为�
 - **基座**：`SHORiN-KiWATA/niri` 的 main，保留其全部功能（网格预览 Grid Overview、放大镜、
   最小化高亮、概览缩放等）。
 - **官方代码**：`niri-wm/niri` 的最新 main 也已合入，之后随上游继续 merge。
-- **液态玻璃（liquid glass）已彻底移除**：旧 `Niri-glass` 的玻璃补丁集
-  （`liquid_glass.rs`、`lg_*` uniform、`clipped_surface.frag` 里的折射/泛光代码、
-  `appearance` 里的 `LiquidGlass` 配置）全部不存在，仓库里 grep 不到任何 `glass`。
 - **保留本分支独有功能**：光标点击特效，实现参考 [ba-click-fx-desktop](https://github.com/CialloKing/ba-click-fx-desktop)，
   全部用 GLES 在合成器内绘制，不依赖外部程序。
 
