@@ -5536,6 +5536,12 @@ impl Niri {
                 output_scale.x as f32,
             );
             tracing::debug!("cursor-effect: pushed {} elements", elems.len());
+            // 注意方向：`push` 的约定是「先推的在上层」（渲染前统一 `.rev()`，
+            // 见 `render_to_vec` 与 `render_inner` 里 pointer 的注释），所以
+            // `collect_render_elements` 返回的是**从前到后**的顺序，直接按序推
+            // 就对了。曾经它返回绘制顺序、这里又原样推，整条特效在实机上被上下
+            // 颠倒（碎片压到最底、拖尾辉光盖在最上），而离线渲染器按返回顺序画
+            // 看不出问题——同一份代码两种结果就是这么来的。
             for elem in elems {
                 push(elem.into());
             }

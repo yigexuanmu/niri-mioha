@@ -10,3 +10,6 @@
 
 .idea
 *.pending-snap
+
+# 本地对比/调参脚本与渲染产物（不进仓库）
+/work

@@ -327,6 +327,421 @@ where
     }
 }
 
+/// `trigger-buttons` 接受的鼠标键名字。
+///
+/// 与 `click-trigger` 的区别：那个是上游 BASpark 的 `ClickTriggerType`，只有
+/// 「左 / 右 / 两者」三档，且侧键、后退键一概不认；这里是一个**显式列表**，
+/// 写几个就认几个，想只让中键和后退键触发也可以。
+///
+/// 名字跟 `binds { MouseLeft; MouseRight; MouseMiddle; MouseBack; MouseForward; }`
+/// 对齐，另外补了 `side` / `extra` / `task`（libinput 的 BTN_SIDE / BTN_EXTRA
+/// / BTN_TASK）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClickTriggerButton {
+    Left,
+    Right,
+    Middle,
+    Back,
+    Forward,
+    Side,
+    Extra,
+    Task,
+}
+
+impl ClickTriggerButton {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Middle => "middle",
+            Self::Back => "back",
+            Self::Forward => "forward",
+            Self::Side => "side",
+            Self::Extra => "extra",
+            Self::Task => "task",
+        }
+    }
+}
+
+impl std::str::FromStr for ClickTriggerButton {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let name = s.trim().to_ascii_lowercase();
+        Ok(match name.as_str() {
+            // `primary` / `secondary` 是 libinput 的别名，顺手认了。
+            "left" | "primary" => Self::Left,
+            "right" | "secondary" => Self::Right,
+            "middle" | "wheel" => Self::Middle,
+            "back" => Self::Back,
+            "forward" => Self::Forward,
+            "side" => Self::Side,
+            "extra" => Self::Extra,
+            "task" => Self::Task,
+            other => {
+                return Err(format!(
+                    "invalid trigger button `{other}`: expected one of \
+                     left/right/middle/back/forward/side/extra/task"
+                ))
+            }
+        })
+    }
+}
+
+/// `trigger-buttons "left" "middle"`：一个节点、任意个字符串参数。
+///
+/// 空节点（`trigger-buttons`）是合法的，表示**一个键都不触发** —— 等价于只
+/// 关掉点击爆裂、保留常驻拖尾。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClickTriggerButtons(pub Vec<ClickTriggerButton>);
+
+impl ClickTriggerButtons {
+    pub fn contains(&self, button: ClickTriggerButton) -> bool {
+        self.0.contains(&button)
+    }
+}
+
+impl<S> knuffel::Decode<S> for ClickTriggerButtons
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, knuffel::errors::DecodeError<S>> {
+        if let Some(type_name) = &node.type_name {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+        let mut out = Vec::with_capacity(node.arguments.len());
+        for arg in node.arguments.iter() {
+            if let Some(typ) = &arg.type_name {
+                ctx.emit_error(knuffel::errors::DecodeError::TypeName {
+                    span: typ.span().clone(),
+                    found: Some((**typ).clone()),
+                    expected: knuffel::errors::ExpectedType::no_type(),
+                    rust_type: "str",
+                });
+            }
+            match &*arg.literal {
+                knuffel::ast::Literal::String(s) => {
+                    out.push(ClickTriggerButton::from_str(s).map_err(|e| {
+                        knuffel::errors::DecodeError::conversion(&arg.literal, e)
+                    })?);
+                }
+                _ => ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                    &arg.literal,
+                    "argument",
+                    "expected a string button name, e.g. trigger-buttons \"left\" \"middle\"",
+                )),
+            }
+        }
+        for child in node.children() {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                child,
+                "node",
+                "no child nodes expected for trigger-buttons",
+            ));
+        }
+        for name in node.properties.keys() {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                name,
+                "property",
+                "no properties expected for trigger-buttons",
+            ));
+        }
+        Ok(Self(out))
+    }
+}
+
+// ─── 光标特效的可调参数块 ───
+//
+// 上游把这些数值硬编码在 C# 的 `EffectsConfig` / `Unity` 侧常量里。niri 侧把它们
+// 拆成五个子块，每个子块只用写想改的那几项，没写的沿用默认值：
+//
+// ```kdl
+// cursor-effect {
+//     disk   { radius 64.8; lifetime 200 }
+//     rings  { count 2; lifetime 600 }
+//     shards { count 4; speed-max 66.5 }
+//     trail  { width 1.0; length 1.0 }
+//     glow   { gain 1.0; radius 1.0 }
+// }
+// ```
+//
+// **单位约定**：所有长度都是「1080p 参考像素」——实际渲染会按输出高度等比缩放，
+// 所以 4K 屏上同样的数字看起来一样大。所有时间都是毫秒。
+
+/// 中心圆盘（点击时在指针位置闪一下的实心圆）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorEffectDisk {
+    /// 半径（1080p 参考像素，默认 64.8）。
+    pub radius: f64,
+    /// 存活时长（毫秒，默认 200）。
+    pub lifetime: f64,
+}
+
+impl Default for CursorEffectDisk {
+    fn default() -> Self {
+        Self {
+            radius: 64.8,
+            lifetime: 200.0,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CursorEffectDiskPart {
+    #[knuffel(child, unwrap(argument))]
+    pub radius: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub lifetime: Option<FloatOrInt<0, { i32::MAX }>>,
+}
+
+impl MergeWith<CursorEffectDiskPart> for CursorEffectDisk {
+    fn merge_with(&mut self, part: &CursorEffectDiskPart) {
+        merge!((self, part), radius, lifetime);
+    }
+}
+
+/// 溶解环（向外扩散并旋转的细环）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorEffectRings {
+    /// 环数量（默认 2，上限 64）。
+    pub count: u32,
+    /// 存活时长（毫秒，默认 600）。
+    pub lifetime: f64,
+    /// 起始半径（1080p 参考像素，默认 68.93）。
+    pub radius_min: f64,
+    /// 结束半径（1080p 参考像素，默认 80.41）。
+    pub radius_max: f64,
+    /// 角速度倍率（默认 11.17，0 = 不转）。
+    pub spin: f64,
+    /// 旋转方向：`1` 或 `-1`（默认 -1）。
+    pub spin_direction: f64,
+    /// 内径比（内径 = 外径 × 该值，默认 0.9401275）。越大环越细。
+    pub inner_ratio: f64,
+    /// HDR 强度，>1 会溢光（默认 5.992157）。
+    pub hdr_intensity: f64,
+}
+
+impl Default for CursorEffectRings {
+    fn default() -> Self {
+        Self {
+            count: 2,
+            lifetime: 600.0,
+            radius_min: 68.925_712_32,
+            radius_max: 80.413_331_04,
+            spin: 11.170_107,
+            spin_direction: -1.0,
+            inner_ratio: 0.940_127_5,
+            hdr_intensity: 5.992_157,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CursorEffectRingsPart {
+    #[knuffel(child, unwrap(argument))]
+    pub count: Option<u32>,
+    #[knuffel(child, unwrap(argument))]
+    pub lifetime: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub radius_min: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub radius_max: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub spin: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub spin_direction: Option<FloatOrInt<{ i32::MIN }, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub inner_ratio: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub hdr_intensity: Option<FloatOrInt<0, 65536>>,
+}
+
+impl MergeWith<CursorEffectRingsPart> for CursorEffectRings {
+    fn merge_with(&mut self, part: &CursorEffectRingsPart) {
+        if let Some(x) = &part.count {
+            self.count = *x;
+        }
+        merge!(
+            (self, part),
+            lifetime,
+            radius_min,
+            radius_max,
+            spin,
+            spin_direction,
+            inner_ratio,
+            hdr_intensity
+        );
+    }
+}
+
+/// 三角碎片（点击瞬间往外迸的三角形）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorEffectShards {
+    /// 每次点击的碎片数（默认 4，上限 1000）。
+    pub count: u32,
+    /// 最短存活时长（毫秒，默认 600）。
+    pub lifetime_min: f64,
+    /// 最长存活时长（毫秒，默认 700）。
+    pub lifetime_max: f64,
+    /// 发射点到指针的偏移半径（1080p 参考像素，默认 49.88）。
+    pub radius: f64,
+    /// 最小初速度（像素/秒，默认 49.88）。
+    pub speed_min: f64,
+    /// 最大初速度（像素/秒，默认 66.50）。
+    pub speed_max: f64,
+    /// 最小尺寸（1080p 参考像素，默认 16.63）。
+    pub size_min: f64,
+    /// 最大尺寸（1080p 参考像素，默认 33.25）。
+    pub size_max: f64,
+    /// HDR 强度（默认 5.992157）。
+    pub hdr_intensity: f64,
+}
+
+impl Default for CursorEffectShards {
+    fn default() -> Self {
+        Self {
+            count: 4,
+            lifetime_min: 600.0,
+            lifetime_max: 700.0,
+            radius: 49.876_948_8,
+            speed_min: 49.876_948_8,
+            speed_max: 66.502_598_4,
+            size_min: 16.625_649_6,
+            size_max: 33.251_299_2,
+            hdr_intensity: 5.992_157,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CursorEffectShardsPart {
+    #[knuffel(child, unwrap(argument))]
+    pub count: Option<u32>,
+    #[knuffel(child, unwrap(argument))]
+    pub lifetime_min: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub lifetime_max: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub radius: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub speed_min: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub speed_max: Option<FloatOrInt<0, { i32::MAX }>>,
+    #[knuffel(child, unwrap(argument))]
+    pub size_min: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub size_max: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub hdr_intensity: Option<FloatOrInt<0, 65536>>,
+}
+
+impl MergeWith<CursorEffectShardsPart> for CursorEffectShards {
+    fn merge_with(&mut self, part: &CursorEffectShardsPart) {
+        if let Some(x) = &part.count {
+            self.count = *x;
+        }
+        merge!(
+            (self, part),
+            lifetime_min,
+            lifetime_max,
+            radius,
+            speed_min,
+            speed_max,
+            size_min,
+            size_max,
+            hdr_intensity
+        );
+    }
+}
+
+/// 拖尾（按住指针移动时留下的光带）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorEffectTrail {
+    /// 宽度倍率（默认 1.0）。
+    pub width: f64,
+    /// 不透明度倍率（默认 1.0，0 = 不画拖尾）。
+    pub opacity: f64,
+    /// 长度倍率（默认 1.0，0 = 拖尾几乎不可见，上限约 33.3）。
+    pub length: f64,
+}
+
+impl Default for CursorEffectTrail {
+    fn default() -> Self {
+        Self {
+            width: 1.0,
+            opacity: 1.0,
+            length: 1.0,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CursorEffectTrailPart {
+    #[knuffel(child, unwrap(argument))]
+    pub width: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub opacity: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub length: Option<FloatOrInt<0, 65536>>,
+}
+
+impl MergeWith<CursorEffectTrailPart> for CursorEffectTrail {
+    fn merge_with(&mut self, part: &CursorEffectTrailPart) {
+        merge!((self, part), width, opacity, length);
+    }
+}
+
+/// 辉光（所有材质外面那层雾，也就是上游 Bloom 的近似）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorEffectGlow {
+    /// 总增益（默认 1.0；`0` = 完全关闭辉光，只留实体图元）。
+    pub gain: f64,
+    /// 半径倍率（默认 1.0；越大雾越远越散）。
+    pub radius: f64,
+    /// **额外**作用在拖尾雾上的增益倍率（默认 1.0）。
+    ///
+    /// 拖尾的雾面积远大于点击特效，两个场景对「雾要多浓」的偏好并不一致：
+    /// 把 `gain` 调低能让慢拖时的雾更透，但点击特效的辉光会跟着一起变淡
+    /// （圆盘外圈那层发光是点击效果的主体，淡了就明显不像）。
+    ///
+    /// 这一项乘在 `gain` 之上、只影响拖尾，所以「点击保持原样、拖尾更淡」
+    /// 写成 `gain 1.0` + `trail-gain 0.55`。
+    pub trail_gain: f64,
+}
+
+impl Default for CursorEffectGlow {
+    fn default() -> Self {
+        Self {
+            gain: 1.0,
+            radius: 1.0,
+            trail_gain: 1.0,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CursorEffectGlowPart {
+    #[knuffel(child, unwrap(argument))]
+    pub gain: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub radius: Option<FloatOrInt<0, 65536>>,
+    #[knuffel(child, unwrap(argument))]
+    pub trail_gain: Option<FloatOrInt<0, 65536>>,
+}
+
+impl MergeWith<CursorEffectGlowPart> for CursorEffectGlow {
+    fn merge_with(&mut self, part: &CursorEffectGlowPart) {
+        merge!((self, part), gain, radius, trail_gain);
+    }
+}
+
 /// 光标特效配置。字段名与默认值对应 BASpark ConfigManager.cs:65-90。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CursorEffect {
@@ -356,12 +771,37 @@ pub struct CursorEffect {
     pub enable_middle_click_trigger: bool,
     /// ClickTriggerType（默认 Left）。
     pub click_trigger: ClickTriggerType,
+    /// 显式列出哪些鼠标键触发点击爆裂（`trigger-buttons "left" "middle"`）。
+    ///
+    /// `Some` 时**完全覆盖** `click-trigger` / `enable-middle-click-trigger`
+    /// 这两项（它们是为兼容上游 BASpark 配置保留的）；`None` 时按旧逻辑合成。
+    pub trigger_buttons: Option<Vec<ClickTriggerButton>>,
     /// HideInFullscreen（默认 true：全屏下单屏隐藏）。
     pub hide_in_fullscreen: bool,
     /// ShowEffectOnDesktop（默认 true：桌面单屏显示）。
     pub show_on_desktop: bool,
     /// IsTouchscreenMode（默认 false）。
     pub touch_mode: bool,
+    /// 整体着色乘数（默认 `255,255,255` = 保留美术原色）。
+    ///
+    /// 与 `color` 的区别：`color` 是上游 BASpark 预留的字段，niri 侧不参与渲染；
+    /// 想调色请用这里。
+    ///
+    /// 语义是**逐通道相乘**，不是换色相：`tint "#808080"` 把整条特效压暗一半，
+    /// `tint "#ffddbb"` 让蓝通道略降、画面偏暖一点点。乘积会保留各通道的相对
+    /// 比例，所以蓝色特效（红分量本来就低）乘什么都不可能变成暖橙 —— 想真正
+    /// 换色相需要另加参数，`tint` 做不到。
+    pub tint: ParticleColor,
+    /// 中心圆盘参数。
+    pub disk: CursorEffectDisk,
+    /// 溶解环参数。
+    pub rings: CursorEffectRings,
+    /// 三角碎片参数。
+    pub shards: CursorEffectShards,
+    /// 拖尾参数。
+    pub trail: CursorEffectTrail,
+    /// 辉光参数。
+    pub glow: CursorEffectGlow,
 }
 
 impl Default for CursorEffect {
@@ -380,9 +820,16 @@ impl Default for CursorEffect {
             apply_curve_draw: false,
             enable_middle_click_trigger: true,
             click_trigger: ClickTriggerType::Left,
+            trigger_buttons: None,
             hide_in_fullscreen: true,
             show_on_desktop: true,
             touch_mode: false,
+            tint: ParticleColor([255, 255, 255]),
+            disk: CursorEffectDisk::default(),
+            rings: CursorEffectRings::default(),
+            shards: CursorEffectShards::default(),
+            trail: CursorEffectTrail::default(),
+            glow: CursorEffectGlow::default(),
         }
     }
 }
@@ -425,6 +872,27 @@ pub struct CursorEffectPart {
     /// `click-trigger "left"` / `"right"` / `"both"`（或 `"0"`/`"1"`/`"2"`，字符串形）。
     #[knuffel(child)]
     pub click_trigger: Option<ClickTriggerType>,
+    /// `trigger-buttons "left" "middle" "back"`：显式列出触发键。
+    #[knuffel(child)]
+    pub trigger_buttons: Option<ClickTriggerButtons>,
+    /// `tint "#ff8800"`：整体着色乘数。
+    #[knuffel(child)]
+    pub tint: Option<ParticleColor>,
+    /// `disk { radius 64.8; lifetime 200 }`
+    #[knuffel(child)]
+    pub disk: Option<CursorEffectDiskPart>,
+    /// `rings { count 2; lifetime 600; ... }`
+    #[knuffel(child)]
+    pub rings: Option<CursorEffectRingsPart>,
+    /// `shards { count 4; speed-max 66.5; ... }`
+    #[knuffel(child)]
+    pub shards: Option<CursorEffectShardsPart>,
+    /// `trail { width 1.0; opacity 1.0; length 1.0 }`
+    #[knuffel(child)]
+    pub trail: Option<CursorEffectTrailPart>,
+    /// `glow { gain 1.0; radius 1.0 }`
+    #[knuffel(child)]
+    pub glow: Option<CursorEffectGlowPart>,
 }
 
 impl MergeWith<CursorEffectPart> for CursorEffect {
@@ -459,6 +927,13 @@ impl MergeWith<CursorEffectPart> for CursorEffect {
         if let Some(x) = &part.click_trigger {
             self.click_trigger = *x;
         }
+        if let Some(x) = &part.trigger_buttons {
+            self.trigger_buttons = Some(x.0.clone());
+        }
+        if let Some(x) = &part.tint {
+            self.tint = *x;
+        }
+        merge!((self, part), disk, rings, shards, trail, glow);
     }
 }
 

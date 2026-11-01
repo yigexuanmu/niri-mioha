@@ -43,6 +43,25 @@ pub struct VisualConfig {
     pub rings_hdr_intensity: f32,
     /// 碎片的 HDR 强度（默认 5.992157）。
     pub shards_hdr_intensity: f32,
+    /// 辉光总增益倍率（1.0 = 上游原样，0 = 完全关闭辉光）。
+    pub glow_gain: f32,
+    /// 额外乘在**拖尾**雾上的增益（默认 1.0；不影响点击特效）。
+    pub glow_trail_gain: f32,
+    /// 辉光半径倍率（同时缩放所有材质的雾）。
+    pub glow_radius: f32,
+    /// 溶解环的内径比（外径的多少倍）。默认 0.9401275。
+    pub ring_inner_ratio: f32,
+    /// 整体着色（线性域，会乘到每个图元的主色上）。`[1,1,1]` = 保留美术原色。
+    pub tint: [f32; 3],
+    /// 拖尾条带是否走曲线拟合（对应 BASpark 的 `ApplyCurveDraw`）。
+    ///
+    /// 关掉时按采样点原样铺直线段 —— 采样率低（默认 40Hz）＋ 移动快的时候，
+    /// 一条弧线会被切成十来段折线，拐点处能看出棱角。打开后用 Catmull-Rom
+    /// 在采样点之间补点，条带贴着曲线走。
+    ///
+    /// 放在 `VisualConfig` 里是因为**只有渲染层消费它**：模拟侧存的是采样点，
+    /// 补点是纯粹的几何后处理，不改变粒子、寿命和进度。
+    pub curve_draw: bool,
 }
 
 impl Default for VisualConfig {
@@ -55,6 +74,12 @@ impl Default for VisualConfig {
             trail_opacity: 1.0,
             rings_hdr_intensity: 5.992_157,
             shards_hdr_intensity: 5.992_157,
+            glow_gain: 1.0,
+            glow_trail_gain: 1.0,
+            glow_radius: 1.0,
+            ring_inner_ratio: 0.940_127_5,
+            tint: [1.0, 1.0, 1.0],
+            curve_draw: false,
         }
     }
 }

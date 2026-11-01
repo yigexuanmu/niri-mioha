@@ -48,14 +48,15 @@ fn direction(angle: f32) -> Point {
 
 /// 特效尺寸的整体比例。
 ///
-/// 上游 Unity / 网页版都以 1080p 为基准：网页版的长度单位是 CSS px，不随屏幕
-/// 物理分辨率放大，所以 2560×1600 的屏幕上圆盘峰值直径仍是一百三十来像素；
-/// 而这里按 `输出高 / 2` 等比放大，1600p 下会胀到 190px 以上，观感明显偏大。
-/// 乘 0.72 后 1600p 的实际尺寸落回 1080p 基准附近，和网页版视觉一致。
+/// 曾经是 0.72：为了模仿「网页版不随分辨率放大」的观感，把 1080p 基准整体
+/// 缩小了一档。但官方 1:1 参考图（`正确的/`，圆盘半径实测 65px ≈ 64.8、环外
+/// 半径 79px 落在 radius-max 80.41 内）证明特效在 1080p 下就是**上游原尺寸**，
+/// 0.72 的整体缩小让盘/环/碎片全部小了近三成，是「环半径偏小」疑案的根源。
 ///
-/// 只作用于「世界单位 → 像素」的换算（图元大小、拖尾宽度、粒子半径），
-/// 不参与世界坐标本身的定义，所以特效位置与半径不会互相牵连。
-pub const EFFECT_SCALE: f32 = 0.72;
+/// 多分辨率的等比放大仍由 `world_to_pixels` 的 `height × 0.5` 承担（与上游
+/// C++ 一致）；想要更小的特效请用 `cursor-effect { scale 0.7 }`，不要再改
+/// 这里。
+pub const EFFECT_SCALE: f32 = 1.0;
 
 /// 视口尺寸（物理像素）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -515,6 +516,27 @@ impl Simulation {
         self.synchronize_trail_time(self.pointer_sample_at);
         self.pointer_trail_sample_at = self.trail_time;
         self.released_at = self.pointer_sample_at;
+        self.commit_trail_head();
+    }
+
+    /// 抬起/取消时把指针的最后位置固化进笔画。
+    ///
+    /// 实时头点（见 `snapshot`）一消失，头端就会向后缩回最多一个采样步长
+    /// （≈5.4px）—— 松手瞬间雾「往回缩一下」。Unity 停止发射时也是把最后的
+    /// transform 位置留在 TrailRenderer 上，不是丢掉。
+    fn commit_trail_head(&mut self) {
+        let Some(last) = self.trail.last() else {
+            return;
+        };
+        if self.pointer_world.sub(last.world).length() <= 1.0e-4 {
+            return;
+        }
+        let head = self.pointer_world;
+        let created_at = self.trail_time;
+        self.trail.push(StoredTrailPoint {
+            world: head,
+            created_at,
+        });
     }
 
     pub fn pointer_cancel(&mut self, time: f64) {
@@ -527,6 +549,7 @@ impl Simulation {
         self.pointer_trail_sample_at = self.trail_time;
         self.released_at = self.pointer_sample_at;
         self.drag_distance_remainder_world = 0.0;
+        self.commit_trail_head();
     }
 
     pub fn advance(&mut self, time: f64) {
@@ -720,9 +743,19 @@ impl Simulation {
                 color: curve::disk_color(normalized_age),
                 // 上游作者值是 2.0。实机深色桌面下盘面发闷（盘心只有
                 // (94,149,255)，而官方参考图是 (108,162,255)），按参考图反解
-                // 需要 3.2：蓝通道早已饱和，提强度实际是在补 R / G 两个弱通道，
-                // 盘心因此从「暗哑的蓝」回到「透亮的蔚蓝」，而不会泛白。
-                intensity: 3.2,
+                // 需要高于 2.0 的强度：蓝通道早已饱和，提强度实际是在补 R / G
+                // 两个弱通道，盘心因此从「暗哑的蓝」回到「透亮的蔚蓝」。
+                //
+                // 但 3.2 是过头了 —— 实测盘心落在 (124,179,255)，比参考图白
+                // 一档，读起来是「发白的蓝球」而不是参考里那个饱和的蔚蓝。
+                // 2.6 让 R / G 各自回落约 20%，蓝通道仍然饱和。
+                //
+                // 2.6 仍比参考帧 `17-27-14` 的盘心 (108,162,255) 高 6~8/255。
+                // 这一档不是「盘自己太亮」，而是盘内所有加法雾之外多出来的常数
+                // 偏移（洞内雾在盘心已经衰减到 0.3/255 以下，碎片雾也只有
+                // +2/255），所以只能落在盘本身上。2.4 让盘心回到 109 左右，
+                // 蓝通道依旧饱和。
+                intensity: 2.4,
                 dissolve_threshold: 0.0,
                 atlas_frame: 0,
                 render_queue: 4499,
@@ -832,6 +865,31 @@ impl Simulation {
                     position: Self::world_to_screen(point.world, viewport),
                     normalized_age,
                 });
+            }
+
+            // 实时头点：Unity `TrailRenderer` 的前缘**永远贴在 transform 上**，
+            // `minVertexDistance` 只决定「什么时候把新顶点固化进位置表」。
+            // 只导出已固化的点，头端就会落后最多 `TRAIL_POINT_STEP_WORLD`
+            // （= 0.01 世界单位 ≈ 5.4px）然后**一跳**。
+            //
+            // 慢速拖动时这一跳正好落在雾的近场：最近距离一帧内变化 5.4px，而
+            // 近场衰减长度只有 6px —— 雾以「每固化一个点脉动一次」的节奏明暗
+            // 跳变（实测 `s7`，60px/s：x=900 处 t=0.20 前一帧 80、之后 169，
+            // 相邻两帧差 2.1 倍）。肉眼就是「慢拖时光晕闪烁」。
+            //
+            // 补上这个瞬态点之后，笔画长度随指针连续增长，雾的最近距离也连续。
+            // 它与已固化的点最多相差一个步长，不影响进度映射的语义。
+            if self.pointer_held {
+                if let Some(last) = self.trail.last() {
+                    let delta = self.pointer_world.sub(last.world);
+                    if delta.length() > 1.0e-4 {
+                        frame.trail.push(TrailPoint {
+                            position: Self::world_to_screen(self.pointer_world, viewport),
+                            // 头点是「此刻」，年龄 0。
+                            normalized_age: 0.0,
+                        });
+                    }
+                }
             }
         }
 

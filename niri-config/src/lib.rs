@@ -1897,9 +1897,52 @@ mod tests {
                 apply_curve_draw: false,
                 enable_middle_click_trigger: true,
                 click_trigger: Left,
+                trigger_buttons: None,
                 hide_in_fullscreen: true,
                 show_on_desktop: true,
                 touch_mode: false,
+                tint: ParticleColor(
+                    [
+                        255,
+                        255,
+                        255,
+                    ],
+                ),
+                disk: CursorEffectDisk {
+                    radius: 64.8,
+                    lifetime: 200.0,
+                },
+                rings: CursorEffectRings {
+                    count: 2,
+                    lifetime: 600.0,
+                    radius_min: 68.92571232,
+                    radius_max: 80.41333104,
+                    spin: 11.170107,
+                    spin_direction: -1.0,
+                    inner_ratio: 0.9401275,
+                    hdr_intensity: 5.992157,
+                },
+                shards: CursorEffectShards {
+                    count: 4,
+                    lifetime_min: 600.0,
+                    lifetime_max: 700.0,
+                    radius: 49.8769488,
+                    speed_min: 49.8769488,
+                    speed_max: 66.5025984,
+                    size_min: 16.6256496,
+                    size_max: 33.2512992,
+                    hdr_intensity: 5.992157,
+                },
+                trail: CursorEffectTrail {
+                    width: 1.0,
+                    opacity: 1.0,
+                    length: 1.0,
+                },
+                glow: CursorEffectGlow {
+                    gain: 1.0,
+                    radius: 1.0,
+                    trail_gain: 1.0,
+                },
             },
             screenshot_path: ScreenshotPath(
                 Some(
@@ -3070,6 +3113,115 @@ mod tests {
         assert!(ce.hide_in_fullscreen);
         assert!(ce.show_on_desktop);
         assert!(!ce.touch_mode);
+        assert_eq!(ce.tint.0, [255, 255, 255], "tint defaults to identity");
+        assert!((ce.disk.radius - 64.8).abs() < 1e-9);
+        assert!((ce.disk.lifetime - 200.0).abs() < 1e-9);
+        assert_eq!(ce.rings.count, 2);
+        assert!((ce.rings.lifetime - 600.0).abs() < 1e-9);
+        assert!((ce.rings.inner_ratio - 0.940_127_5).abs() < 1e-9);
+        assert_eq!(ce.shards.count, 4);
+        assert!((ce.shards.speed_max - 66.502_598_4).abs() < 1e-6);
+        assert!((ce.trail.width - 1.0).abs() < 1e-9);
+        assert!((ce.trail.opacity - 1.0).abs() < 1e-9);
+        assert!((ce.trail.length - 1.0).abs() < 1e-9);
+        assert!((ce.glow.gain - 1.0).abs() < 1e-9);
+        assert!((ce.glow.radius - 1.0).abs() < 1e-9);
+    }
+
+    /// 调参子块：只写想改的项，其余保持默认；顺序无关。
+    #[test]
+    fn cursor_effect_parses_tuning_blocks() {
+        let config = Config::parse_mem(
+            r##"
+            cursor-effect {
+                tint "#ff8800"
+                disk {
+                    radius 100.0
+                }
+                rings {
+                    count 5
+                    spin 0
+                    inner-ratio 0.5
+                }
+                shards {
+                    count 12
+                    size-max 40.0
+                }
+                trail {
+                    opacity 0.5
+                    length 2.5
+                }
+                glow {
+                    gain 0
+                    radius 3.0
+                }
+            }
+            "##,
+        )
+        .unwrap();
+        let ce = &config.cursor_effect;
+        assert_eq!(ce.tint.0, [0xff, 0x88, 0x00]);
+
+        assert_eq!(ce.disk.radius, 100.0);
+        // 未写的项沿用默认。
+        assert_eq!(ce.disk.lifetime, 200.0);
+
+        assert_eq!(ce.rings.count, 5);
+        assert_eq!(ce.rings.spin, 0.0);
+        assert_eq!(ce.rings.inner_ratio, 0.5);
+        assert_eq!(ce.rings.radius_min, 68.925_712_32);
+        assert_eq!(ce.rings.spin_direction, -1.0);
+
+        assert_eq!(ce.shards.count, 12);
+        assert_eq!(ce.shards.size_max, 40.0);
+        assert_eq!(ce.shards.size_min, 16.625_649_6);
+
+        assert_eq!(ce.trail.opacity, 0.5);
+        assert_eq!(ce.trail.length, 2.5);
+        assert_eq!(ce.trail.width, 1.0);
+
+        assert_eq!(ce.glow.gain, 0.0);
+        assert_eq!(ce.glow.radius, 3.0);
+    }
+
+    /// 子块是「单节点」语义：同一个 `cursor-effect {}` 里写两次 `glow` 会报错。
+    /// 这与 niri 其它单子节点配置一致 —— 与其静默合并出一份用户没预期的参数，
+    /// 不如直接把重复报出来。
+    #[test]
+    fn cursor_effect_duplicate_tuning_block_is_error() {
+        // 错误细节包在 `ConfigIncludeError` 里（外层只显示 "error parsing KDL"），
+        // 这里只断言「拒绝解析」，具体文案由 knuffel 负责。
+        assert!(
+            Config::parse_mem(
+                r#"
+                cursor-effect {
+                    glow {
+                        gain 0.5
+                    }
+                    glow {
+                        radius 2.0
+                    }
+                }
+                "#,
+            )
+            .is_err(),
+            "duplicate tuning block must be rejected"
+        );
+    }
+
+    /// 负数会被 `FloatOrInt<0, _>` 拦下：配置报错比静默接受更好。
+    #[test]
+    fn cursor_effect_rejects_negative_tuning_value() {
+        assert!(Config::parse_mem(
+            r#"
+            cursor-effect {
+                disk {
+                    radius -1
+                }
+            }
+            "#,
+        )
+        .is_err());
     }
 
     #[test]
@@ -3228,6 +3380,41 @@ mod tests {
                 hide-in-fullscreen false
                 show-on-desktop true
                 touch-mode false
+                tint "#2EAFFF"
+                disk {
+                    radius 64.8
+                    lifetime 200
+                }
+                rings {
+                    count 2
+                    lifetime 600
+                    radius-min 68.93
+                    radius-max 80.41
+                    spin 11.17
+                    spin-direction -1
+                    inner-ratio 0.9401275
+                    hdr-intensity 5.992157
+                }
+                shards {
+                    count 4
+                    lifetime-min 600
+                    lifetime-max 700
+                    radius 49.88
+                    speed-min 49.88
+                    speed-max 66.5
+                    size-min 16.63
+                    size-max 33.25
+                    hdr-intensity 5.992157
+                }
+                trail {
+                    width 1.0
+                    opacity 1.0
+                    length 1.0
+                }
+                glow {
+                    gain 1.0
+                    radius 1.0
+                }
             }
             "##,
         )
@@ -3249,5 +3436,13 @@ mod tests {
         assert!(!ce.hide_in_fullscreen);
         assert!(ce.show_on_desktop);
         assert!(!ce.touch_mode);
+        assert_eq!(ce.tint.0, [0x2E, 0xAF, 0xFF]);
+        assert_eq!(ce.disk.radius, 64.8);
+        assert_eq!(ce.rings.count, 2);
+        assert_eq!(ce.rings.spin_direction, -1.0);
+        assert_eq!(ce.shards.count, 4);
+        assert_eq!(ce.shards.hdr_intensity, 5.992_157);
+        assert_eq!(ce.trail.length, 1.0);
+        assert_eq!(ce.glow.gain, 1.0);
     }
 }

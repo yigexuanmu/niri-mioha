@@ -3650,26 +3650,35 @@ impl State {
 
         // 光标特效：按键按下触发点击爆裂（同时开始拖尾），抬起结束拖尾。
         {
-            let is_left = button == Some(MouseButton::Left);
-            let is_middle = button == Some(MouseButton::Middle);
+            // 按到特效的键先翻成 `TriggerButton`，具体认哪些键由配置
+            // `trigger-buttons` 决定（`cursor-effect` 自己的状态里判断）。
+            let trigger_button = button.and_then(|button| {
+                Some(match button {
+                    MouseButton::Left => crate::cursor_effect::TriggerButton::Left,
+                    MouseButton::Right => crate::cursor_effect::TriggerButton::Right,
+                    MouseButton::Middle => crate::cursor_effect::TriggerButton::Middle,
+                    MouseButton::Back => crate::cursor_effect::TriggerButton::Back,
+                    MouseButton::Forward => crate::cursor_effect::TriggerButton::Forward,
+                    _ => return None,
+                })
+            });
             let now = Instant::now();
             let loc = pointer.current_location();
             let target = crate::cursor_effect::output_local_pointer(&self.niri, loc);
             let ce = &mut self.niri.cursor_effect;
             if let Some((pos, viewport)) = target {
                 tracing::debug!(
-                    "cursor-effect: button {:?}/{:?} at {:?} viewport={:?} (left={} middle={})",
+                    "cursor-effect: button {:?} -> {:?}/{:?} at {:?} viewport={:?}",
                     button,
+                    trigger_button,
                     button_state,
                     pos,
                     viewport,
-                    is_left,
-                    is_middle
                 );
                 ce.set_viewport(viewport);
                 if ButtonState::Pressed == button_state {
-                    if is_left || is_middle || button == Some(MouseButton::Right) {
-                        ce.on_button_press(pos, now, is_left, is_middle);
+                    if let Some(pressed) = trigger_button {
+                        ce.on_button_press(pos, now, pressed);
                     }
                 }
             } else {
@@ -5040,6 +5049,20 @@ impl State {
         };
         let slot = evt.slot();
 
+        // 光标特效：`touch-mode` 打开时，手指按下就是一次「左键按下」。
+        // 触摸屏没有悬停光标，不走这条路径的话按下去什么都不会发生 —— 上游
+        // 的 `IsTouchscreenMode` 就是为这种设备准备的开关。
+        if self.niri.cursor_effect.touch_mode() {
+            let now = Instant::now();
+            if let Some((fx, viewport)) =
+                crate::cursor_effect::output_local_pointer(&self.niri, pos)
+            {
+                let ce = &mut self.niri.cursor_effect;
+                ce.set_viewport(viewport);
+                ce.on_button_press(fx, now, crate::cursor_effect::TriggerButton::Left);
+            }
+        }
+
         let serial = SERIAL_COUNTER.next_serial();
 
         let under = self.niri.contents_under(pos);
@@ -5169,8 +5192,7 @@ impl State {
         };
         let slot = evt.slot();
 
-        if let Some(capture) = self.niri.screenshot_ui.pointer_up(Some(slot)) {
-            if capture {
+        if let Some(capture) = self.niri.screenshot_ui.pointer_up(Some(slot)) {            if capture {
                 self.confirm_screenshot(true);
             } else {
                 self.niri.queue_redraw_all();
@@ -5178,6 +5200,14 @@ impl State {
         }
 
         let serial = SERIAL_COUNTER.next_serial();
+
+        // 光标特效：`touch-mode` 打开时，手指抬起结束拖尾（不再触发爆裂，
+        // 爆裂只跟「按下」走）。
+        if self.niri.cursor_effect.touch_mode() {
+            let now = Instant::now();
+            self.niri.cursor_effect.on_button_release(now);
+        }
+
         handle.up(
             self,
             &UpEvent {
@@ -5225,6 +5255,19 @@ impl State {
             if let Some((output, pos_within_output)) = self.niri.output_under(pos) {
                 let output = output.clone();
                 self.niri.layout.dnd_update(output, pos_within_output);
+            }
+        }
+
+        // 光标特效：`touch-mode` 打开时，手指的连续移动喂给拖尾（内部有输入
+        // 采样门，采样率配置与鼠标共用同一份）。
+        if self.niri.cursor_effect.touch_mode() {
+            let now = Instant::now();
+            if let Some((fx, viewport)) =
+                crate::cursor_effect::output_local_pointer(&self.niri, pos)
+            {
+                let ce = &mut self.niri.cursor_effect;
+                ce.set_viewport(viewport);
+                ce.on_move(fx, now);
             }
         }
     }
