@@ -1,0 +1,56 @@
+niri-mioha — Third-Party Notices / 第三方组件许可声明
+===============================================================================
+
+本文件记录 niri-mioha 中来自其他项目的代码、纹理数据与许可证。它不是法律
+意见；对外分发前请自行完成合规审查。
+
+1. niri
+-------
+本仓库主体派生自 niri（niri-wm/niri，GPL-3.0-or-later），并保留了其 git 历史。
+主体代码按 GPL-3.0-or-later 发布，完整文本见根目录 LICENSE 与
+LICENSES/GPL-3.0-or-later.txt。
+
+2. ba-click-fx-desktop（光标特效）
+---------------------------------
+来源：https://github.com/CialloKing/ba-click-fx-desktop
+许可证：GPL-2.0-only
+版权：上游仓库的作者与贡献者（Copyright holders as listed upstream）
+
+本仓库光标特效模块由该上游移植/衍生，包括但不限于：
+
+  - src/cursor_effect/ba/curve.rs    （Hermite 曲线、颜色/尺寸/溶解曲线）
+  - src/cursor_effect/ba/sim.rs      （点击粒子模拟）
+  - src/cursor_effect/ba/trail.rs    （Unity TrailRenderer 条带网格）
+  - src/cursor_effect/ba/lz4.rs      （LZ4 解码）
+  - src/cursor_effect/ba/textures.rs （内嵌纹理的惰性解码）
+  - src/cursor_effect/ba_data/*.lz4  （center_disk / dissolve_ring /
+                                       triangle_atlas / trail 的上游纹理数据）
+  - src/render_helpers/shaders/cursor_effect.frag（四个材质函数与 Bloom/
+                                                    transport 的移植部分）
+  - src/cursor_effect/render.rs      （条带几何与渲染集成）
+
+GPL-2.0-only 完整文本见 LICENSES/GPL-2.0-only.txt。
+
+3. 重要：GPL-2.0-only 与 GPL-3.0 的兼容性
+-----------------------------------------
+GPL-2.0-only 与本仓库主体的 GPL-3.0-or-later 不兼容。把上述光标特效模块与
+niri 主体合并后的二进制或源码包，当前不能仅凭本仓库的 LICENSE 完成分发授权。
+在完成以下任一方案之前，请勿分发合并后的产物：
+
+  a) 联系上游作者取得 GPL-2.0-only 与 GPL-3.0 兼容的双许可/例外；
+  b) 把光标特效拆成独立进程/独立程序，通过 IPC 或渲染合成通信；
+  c) 重写相关代码与纹理，使其不再包含 GPL-2.0-only 的衍生材料。
+
+在上游许可尚未解决期间，本仓库不对合并产物的分发作出授权；这不是对
+GPL-3.0 或 GPL-2.0 的额外许可，也不改变任何上游许可证的条款。
+
+4. 纹理与商标
+-------------
+ba_data 下的纹理来自上游 GPL-2.0-only 程序，随上游代码一并按 GPL-2.0-only
+处理。《蔚蓝档案》（Blue Archive）及其角色/标识的权利归各自权利人所有；本
+项目与 NEXON、Yostar、BA 官方无隶属关系，也不声称拥有相关商标权。
+
+5. 免责声明
+-----------
+本文件按“现状”提供，不构成法律意见，也不提供任何明示或默示担保。分发者应
+自行确认 GPL 的源码提供、许可证文本随附、修改声明等义务。

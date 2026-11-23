@@ -1,3 +1,6 @@
+// Derived from CialloKing/ba-click-fx-desktop (GPL-2.0-only).
+// See THIRD-PARTY-NOTICES.txt and LICENSES/GPL-2.0-only.txt.
+
 precision highp float;
 
 #if defined(DEBUG_FLAGS)

@@ -1,5 +1,8 @@
 //! BA 点击特效的曲线、颜色与参数层。
 //!
+//! 许可证：GPL-2.0-only（派生自 CialloKing/ba-click-fx-desktop）。
+//! 见 THIRD-PARTY-NOTICES.txt 与 LICENSES/GPL-2.0-only.txt。
+//!
 //! 逐行移植自 `CialloKing/ba-click-fx-desktop` 的 `src/fx/src/simulation.cpp`
 //! 匿名命名空间部分（Hermite 曲线求值/积分、颜色渐变、磁盘/环/碎片的大小与
 //! 颜色曲线、环角速度积分、参数归一化）。

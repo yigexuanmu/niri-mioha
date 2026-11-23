@@ -1,5 +1,8 @@
 //! 最小 LZ4 block 解码器。
 //!
+//! 许可证：GPL-2.0-only（派生自 CialloKing/ba-click-fx-desktop）。
+//! 见 THIRD-PARTY-NOTICES.txt 与 LICENSES/GPL-2.0-only.txt。
+//!
 //! 上游把四张参考纹理以 raw LZ4 block 编进可执行文件（没有帧头/校验和），
 //! 这里做同样的解码，避免在仓库里塞 2.3 MB 的裸像素。
 

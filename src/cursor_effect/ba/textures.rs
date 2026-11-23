@@ -1,5 +1,8 @@
 //! 四张参考纹理的资源与惰性解码。
 //!
+//! 许可证：GPL-2.0-only（派生自 CialloKing/ba-click-fx-desktop）。
+//! 见 THIRD-PARTY-NOTICES.txt 与 LICENSES/GPL-2.0-only.txt。
+//!
 //! 数据直接来自上游 `ba-click-fx-desktop` 内嵌的 LZ4 块（同一份字节，
 //! SHA256 已在提取时校验）。解码后是紧凑的 RGBA8，供 GLES 上传。
 

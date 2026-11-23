@@ -1,5 +1,8 @@
 //! 拖尾条带网格与进度渐变。
 //!
+//! 许可证：GPL-2.0-only（派生自 CialloKing/ba-click-fx-desktop）。
+//! 见 THIRD-PARTY-NOTICES.txt 与 LICENSES/GPL-2.0-only.txt。
+//!
 //! 移植自 `ba-click-fx-desktop` 的 `src/core/src/unity_trail_mesh.cpp`：
 //! Unity `TrailRenderer` 的斜接（miter）条带、拐角外弧、两端半圆帽，以及
 //! 按弧长进度取色的渐变。渲染层把这条网格拆成逐段的四边形绘制（见

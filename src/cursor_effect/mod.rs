@@ -4,6 +4,9 @@
 //! [`CialloKing/ba-click-fx-desktop`](https://github.com/CialloKing/ba-click-fx-desktop)
 //! （《蔚蓝档案》的 FX_Touch 点击特效重建）。粒子模拟、曲线、纹理都来自上游，
 //! 这里只负责接上 niri 的指针事件与 GLES 渲染。
+//!
+//! 许可证：niri 集成部分为 GPL-3.0-or-later；`ba` 子模块及其纹理为
+//! GPL-2.0-only。合并分发的兼容性限制见 THIRD-PARTY-NOTICES.txt。
 
 pub mod ba;
 pub mod effect_target;

@@ -1,3 +1,4 @@
+//! 条带几何/渲染集成包含 GPL-2.0-only 的衍生材料；见 THIRD-PARTY-NOTICES.txt。
 //! 光标特效 GLES 渲染层（Cursor Effects Rendering）。
 //!
 //! 分两层：

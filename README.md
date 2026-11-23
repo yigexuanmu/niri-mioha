@@ -138,6 +138,22 @@ nix build .#niri
 inputs.niri-mioha.url = "github:yigexuanmu/niri-mioha";
 ```
 
+## 许可证
+
+本仓库主体（niri 派生部分）按 **GPL-3.0-or-later** 发布，完整文本见根目录
+[`LICENSE`](LICENSE) 与 [`LICENSES/GPL-3.0-or-later.txt`](LICENSES/GPL-3.0-or-later.txt)。
+
+`src/cursor_effect/` 的光标特效模块移植/衍生自
+[CialloKing/ba-click-fx-desktop](https://github.com/CialloKing/ba-click-fx-desktop)
+（**GPL-2.0-only**），包括 `ba/` 的模拟、曲线、条带与 LZ4/纹理代码，
+`ba_data/` 的四张纹理压缩数据，以及着色器中的对应材质/Bloom 部分。
+
+**重要限制**：GPL-2.0-only 与 GPL-3.0 不兼容。当前仓库作为整体
+（GPL-3.0 主体 + GPL-2.0-only 模块）的分发需要先取得上游双许可、拆分独立
+进程或重写相关层；在完成前，请不要把合并后的二进制或源码包视为已获得分发
+授权。第三方归属、涉及文件和完整说明见
+[`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt)。
+
 ## 追踪上游
 
 两个远程已经配好，更新时：

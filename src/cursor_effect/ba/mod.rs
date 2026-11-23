@@ -1,5 +1,8 @@
 //! BA 点击特效（`ba-click-fx-desktop`）的移植实现。
 //!
+//! 许可证：GPL-2.0-only（派生自 CialloKing/ba-click-fx-desktop）。
+//! 见 THIRD-PARTY-NOTICES.txt 与 LICENSES/GPL-2.0-only.txt。
+//!
 //! 上游是 Windows/D3D11 的桌面特效程序，这里只搬「特效本身」：
 //!
 //! - `curve`：Hermite 曲线、颜色渐变、各图层的尺寸/颜色/溶解曲线、环角速度积分。

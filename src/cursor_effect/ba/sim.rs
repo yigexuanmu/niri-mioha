@@ -1,5 +1,8 @@
 //! BA 点击特效粒子模拟（Rust 移植）。
 //!
+//! 许可证：GPL-2.0-only（派生自 CialloKing/ba-click-fx-desktop）。
+//! 见 THIRD-PARTY-NOTICES.txt 与 LICENSES/GPL-2.0-only.txt。
+//!
 //! 逐行移植自 `CialloKing/ba-click-fx-desktop` 的 `src/fx/src/simulation.cpp`
 //! （`bafx::fx::Simulation`）。语义、随机数、时间戳推进顺序、回收时机都保持
 //! 一致，唯一差别是时间用 `f64` 秒而不是 `chrono::nanoseconds`，以及不把
