@@ -87,10 +87,15 @@ fn ce_dump_enabled() -> bool {
     *CACHE.get_or_init(|| std::env::var_os("CE_DUMP").is_some())
 }
 
-/// 语义化调试开关 `CE_NOJOINT=1`：关闭拐点外弧补片，用于对比补片前后的缺口。
+/// 拐点圆盘补片默认关闭。
+///
+/// 实机反馈「拖尾每段连接处有突起」：逐段四边形本身已经是胶囊体（圆头
+/// 端点），两段在共享拐点处天然重叠；再叠一个半径 = 半宽的全圆盘，会在
+/// 每个接缝的内侧/外侧都鼓出一圈，正是那些突起。只有确实需要对比旧实验
+/// （`CE_JOINT=1`）时才画。
 fn ce_joint_enabled() -> bool {
     static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| std::env::var_os("CE_NOJOINT").is_none())
+    *CACHE.get_or_init(|| std::env::var_os("CE_JOINT").is_some())
 }
 
 /// 精灵/拖尾段的四边形额外留白（物理像素），避免柔边被矩形裁掉。
