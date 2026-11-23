@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
     {
         let State { backend, niri } = &mut state;
         backend.headless().add_renderer().context("add renderer")?;
-        backend.headless().add_output(niri, 1, (1920, 1080));
+        backend.headless().add_output(niri, 1, (2560, 1600));
         niri.apply_cursor_effect_config(&cursor_config);
 
         let output = niri
@@ -56,13 +56,13 @@ fn main() -> anyhow::Result<()> {
             .context("headless output missing")?
             .clone();
         let output_name = output.name();
-        let viewport = Viewport::new(1920, 1080);
+        let viewport = Viewport::new(2560, 1600);
         let start = Instant::now();
         niri.cursor_effect.set_time_origin(start);
 
         // T2：点击后推进必须要求出帧（winit/TTY 共用路径）。
         niri.cursor_effect_pointer_down(
-            Point::<f64, Logical>::new(960.0, 540.0),
+            Point::<f64, Logical>::new(2500.0, 1400.0),
             start,
             TriggerButton::Left,
         );

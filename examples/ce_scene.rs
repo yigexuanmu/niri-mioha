@@ -367,7 +367,18 @@ fn scenes() -> Vec<Scene> {
         path: s9_path,
     };
 
-    vec![s1, s2, s3, s4, s5, s6, s7, s8, s9, demo, r1]
+    // EDGE：在屏幕右边缘点击，用于回归「右侧区域不显示特效」。
+    let edge = Scene {
+        name: "edge",
+        path: Path::from_points(vec![(1700.0, 900.0), (1701.0, 900.0)]),
+        speed: 0.0,
+        press_at: Some(0.0),
+        release_at: None,
+        end: 0.60,
+        samples: vec![0.10, 0.20, 0.30],
+    };
+
+    vec![s1, s2, s3, s4, s5, s6, s7, s8, s9, edge, demo, r1]
 }
 
 // ── 渲染 ────────────────────────────────────────────────────────────────────
@@ -378,6 +389,7 @@ fn render_frame(
     filter: Option<Material>,
     bg: [f32; 3],
     out: &FsPath,
+    scale: f64,
 ) -> anyhow::Result<()> {
     let (w, h) = out_size();
     let size = Size::<i32, BufferCoord>::from((w, h));
@@ -415,7 +427,7 @@ fn render_frame(
                 }
             }
             let src = elem.src();
-            let dst = elem.geometry(Scale::from(1.0));
+            let dst = elem.geometry(Scale::from(scale));
             if std::env::var("CE_GLDBG").is_ok() {
                 let mut guard = frame.renderer();
                 let renderer = guard.as_mut();
@@ -472,6 +484,18 @@ fn render_frame(
     Ok(())
 }
 
+/// 输出 fractional scale（`CE_SCALE`，默认 1.0）。用于复现 HiDPI 下元素物理尺寸。
+fn scene_scale() -> f64 {
+    static CACHE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("CE_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(1.0)
+    })
+}
+
 fn material_tag(m: Material) -> &'static str {
     match m {
         Material::Disk => "disk",
@@ -493,6 +517,7 @@ fn run_scene(
     fs::create_dir_all(&dir)?;
 
     let mut state = CursorEffectState::default();
+    let scale = scene_scale();
     let (vw, vh) = out_size();
     state.set_viewport(Viewport::new(vw as u32, vh as u32));
     if let Some(settings) = settings {
@@ -551,7 +576,7 @@ fn run_scene(
         while si < samples.len() && samples[si] <= t + EPS {
             let ts = samples[si];
             si += 1;
-            let mut elems = collect_render_elements(renderer, &state, now_at(ts), 1.0);
+            let mut elems = collect_render_elements(renderer, &state, now_at(ts), scale as f32);
             // CE_SEG=N：只画第 N 个拖尾段，其余全丢。用来逐段检查形状，
             // 判断「拖尾断成一节节」到底是每段自身收缩，还是段与段之间漏画。
             //
@@ -587,7 +612,7 @@ fn run_scene(
             }
             if std::env::var("CE_DUMP").is_ok() {
                 for e in &elems {
-                    let g = e.geometry(Scale::from(1.0));
+                    let g = e.geometry(Scale::from(scale));
                     println!(
                         "    {:?} quad=({},{} {}x{})",
                         e.material(),
@@ -598,7 +623,7 @@ fn run_scene(
                     );
                 }
             }
-            render_frame(renderer, &elems, None, bg, &composite)?;
+            render_frame(renderer, &elems, None, bg, &composite, scale)?;
             println!(
                 "{} t={ts:.3} elements={} disk={} ring={} tri={} trail={} -> {}",
                 scene.name,
@@ -620,7 +645,8 @@ fn run_scene(
                     // `CE_ONLY` 收集一次，走与主图完全相同的离屏管线。
                     let previous = std::env::var("CE_ONLY").ok();
                     std::env::set_var("CE_ONLY", material_tag(m));
-                    let iso_elems = collect_render_elements(renderer, &state, now_at(ts), 1.0);
+                    let iso_elems =
+                        collect_render_elements(renderer, &state, now_at(ts), scale as f32);
                     match previous {
                         Some(value) => std::env::set_var("CE_ONLY", value),
                         None => std::env::remove_var("CE_ONLY"),
@@ -629,7 +655,7 @@ fn run_scene(
                         continue;
                     }
                     let p = dir.join(format!("{ts:.3}.{}.ppm", material_tag(m)));
-                    render_frame(renderer, &iso_elems, None, bg, &p)?;
+                    render_frame(renderer, &iso_elems, None, bg, &p, scale)?;
                 }
             }
         }

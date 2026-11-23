@@ -1622,7 +1622,9 @@ pub fn collect_render_elements_for(
     let Some(union) = union else {
         return Vec::new();
     };
-    let viewport = state.viewport();
+    // P6：必须用调用方传入的**本输出** viewport，不能再回读 `state.viewport()`。
+    // 后者是默认 slot（1920×1080）；在 2560×1600 这类输出上会把包围盒裁到
+    // 1920×1080，导致屏幕右侧/下侧整片没有特效（本次实机问题）。
     let viewport_rect = Rectangle::new(
         Point::from((0, 0)),
         Size::from((viewport.width as i32, viewport.height as i32)),
