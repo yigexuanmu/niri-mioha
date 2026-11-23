@@ -136,11 +136,18 @@ void main() {
         // CrossPixel：R 通道当形状遮罩。
         vec4 texel = texture2D(tex_disk, sprite_uv(pixel));
         float shape = srgb_to_linear_ch(texel.r);
+        // P2 去掉了旧的 capacity 压缩后，盘面 emission 不再被 alpha 压过。
+        // 盘色在生命周期末尾把 `color.a` 降到 0，但 emission 仍非零：direct
+        // 预乘 over 会把它当成纯加法，盘心在 alpha=0 之后还留一个 Bloom 鬼影。
+        // 上游 CrossPixel 的 emission 也不乘 coverage，但它的盘在 200ms 处
+        // 已经不可见；这里显式乘盘色 alpha，让盘随 alpha 一起消失（与旧版
+        // 实机行为一致，也避免 transport 用 Bloom 把鬼影重新抬起来）。
         emission = srgb_to_linear(texel.rgb)
             * u_color
             * u_intensity
             * shape
-            * global_opacity;
+            * global_opacity
+            * clamp(u_color_a, 0.0, 1.0);
         coverage = clamp(shape * u_color_a, 0.0, 1.0) * global_opacity;
     } else if (u_mode < 1.5) {
         // DissolvePixel：只保留 alpha 高于阈值的部分，硬 clip。
