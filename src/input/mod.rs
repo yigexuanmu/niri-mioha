@@ -3192,6 +3192,38 @@ impl State {
 
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
+        // 光标特效：必须放在所有窗口/MRU/截图/抓取早退之前。否则 winit 或
+        // pointer grab 路径提前 return 时，输入根本不会进入 CursorEffectState ——
+        // 实机日志里的 `snapshot empty (sprites=0 strokes=0)` 正是这个现象。
+        {
+            let trigger_button = button.and_then(|button| {
+                Some(match button {
+                    MouseButton::Left => crate::cursor_effect::TriggerButton::Left,
+                    MouseButton::Right => crate::cursor_effect::TriggerButton::Right,
+                    MouseButton::Middle => crate::cursor_effect::TriggerButton::Middle,
+                    MouseButton::Back => crate::cursor_effect::TriggerButton::Back,
+                    MouseButton::Forward => crate::cursor_effect::TriggerButton::Forward,
+                    _ => return None,
+                })
+            });
+            let now = Instant::now();
+            let loc = pointer.current_location();
+            tracing::debug!(
+                "cursor-effect: input button {:?} {:?} at {:?}",
+                button,
+                button_state,
+                loc
+            );
+            if ButtonState::Pressed == button_state {
+                if let Some(pressed) = trigger_button {
+                    self.niri.cursor_effect_pointer_down(loc, now, pressed);
+                }
+            }
+            if ButtonState::Released == button_state {
+                self.niri.cursor_effect_pointer_up(now);
+            }
+        }
+
         // Ignore release events for mouse clicks that triggered a bind.
         if self.niri.suppressed_buttons.remove(&button_code) {
             return;
@@ -3630,30 +3662,6 @@ impl State {
                 } else {
                     self.niri.queue_redraw_all();
                 }
-            }
-        }
-
-        // 光标特效：按下触发爆裂、抬起结束拖尾；P6 广播到所有输出。
-        {
-            let trigger_button = button.and_then(|button| {
-                Some(match button {
-                    MouseButton::Left => crate::cursor_effect::TriggerButton::Left,
-                    MouseButton::Right => crate::cursor_effect::TriggerButton::Right,
-                    MouseButton::Middle => crate::cursor_effect::TriggerButton::Middle,
-                    MouseButton::Back => crate::cursor_effect::TriggerButton::Back,
-                    MouseButton::Forward => crate::cursor_effect::TriggerButton::Forward,
-                    _ => return None,
-                })
-            });
-            let now = Instant::now();
-            let loc = pointer.current_location();
-            if ButtonState::Pressed == button_state {
-                if let Some(pressed) = trigger_button {
-                    self.niri.cursor_effect_pointer_down(loc, now, pressed);
-                }
-            }
-            if ButtonState::Released == button_state {
-                self.niri.cursor_effect_pointer_up(now);
             }
         }
 

@@ -75,11 +75,25 @@ pub fn output_pointer_for(
     ))
 }
 
-/// 当前所有输出的 key（用于抬起 / 取消广播）。
+/// 当前所有已注册输出的 key（用于抬起 / 取消广播）。
+///
+/// 用 `output_state` 而不是 `global_space.outputs()`：winit 嵌套等路径里后者
+/// 可能还没包含新输出，导致点击根本不会进入模拟（实机 winit 日志正是 0 元素）。
 fn output_keys(niri: &Niri) -> Vec<String> {
-    niri.global_space
-        .outputs()
+    niri.output_state
+        .keys()
         .map(|output| output.name())
+        .collect()
+}
+
+/// 当前所有已注册输出上的指针目标。
+fn output_targets(niri: &Niri, global: Point<f64, Logical>) -> Vec<(String, FxPoint, Viewport)> {
+    niri.output_state
+        .keys()
+        .filter_map(|output| {
+            let (pos, viewport) = output_pointer_for(niri, output, global)?;
+            Some((output.name(), pos, viewport))
+        })
         .collect()
 }
 
@@ -94,14 +108,15 @@ impl Niri {
         now: Instant,
         button: TriggerButton,
     ) {
-        let targets: Vec<(String, FxPoint, Viewport)> = self
-            .global_space
-            .outputs()
-            .filter_map(|output| {
-                let (pos, viewport) = output_pointer_for(self, output, global)?;
-                Some((output.name(), pos, viewport))
-            })
-            .collect();
+        let targets = output_targets(self, global);
+        tracing::debug!(
+            "cursor-effect: input down at {:?} targets={:?}",
+            global,
+            targets
+                .iter()
+                .map(|(key, _, _)| key.as_str())
+                .collect::<Vec<_>>()
+        );
         for (key, pos, viewport) in targets {
             self.cursor_effect
                 .on_button_press_for(&key, pos, viewport, now, button);
@@ -110,14 +125,7 @@ impl Niri {
 
     /// 指针移动：同样广播到所有输出，跨屏拖尾因此连续。
     pub fn cursor_effect_pointer_move(&mut self, global: Point<f64, Logical>, now: Instant) {
-        let targets: Vec<(String, FxPoint, Viewport)> = self
-            .global_space
-            .outputs()
-            .filter_map(|output| {
-                let (pos, viewport) = output_pointer_for(self, output, global)?;
-                Some((output.name(), pos, viewport))
-            })
-            .collect();
+        let targets = output_targets(self, global);
         for (key, pos, viewport) in targets {
             self.cursor_effect.on_move_for(&key, pos, viewport, now);
         }

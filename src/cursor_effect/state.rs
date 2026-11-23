@@ -316,6 +316,14 @@ impl CursorEffectState {
         now: Instant,
         button: TriggerButton,
     ) {
+        tracing::debug!(
+            "cursor-effect: press key={} button={:?} enabled={} accepted={} viewport={:?}",
+            key,
+            button,
+            self.enabled,
+            self.click_trigger.accepts(button),
+            viewport
+        );
         if !self.enabled {
             return;
         }
