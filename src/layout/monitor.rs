@@ -1099,12 +1099,8 @@ impl<W: LayoutElement> Monitor<W> {
                 }
                 for (window_id, mut pos, scale) in starts {
                     pos.y += gap_offset;
-                    self.workspaces[new_idx].set_grid_window_transition_start(
-                        &window_id,
-                        pos,
-                        scale,
-                        config.clone(),
-                    );
+                    self.workspaces[new_idx]
+                        .set_grid_window_transition_start(&window_id, pos, scale, config);
                 }
             } else {
                 let (column, new_render_pos) = self.workspaces[new_idx]

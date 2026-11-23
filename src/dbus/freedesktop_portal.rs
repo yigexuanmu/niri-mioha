@@ -820,7 +820,7 @@ fn parse_restore_data(vendor: &str, version: u32, inner: &Value<'_>) -> Option<R
 
     let mut monitors = Vec::new();
     for stream in streams.iter() {
-        let stream = unwrap_variant(&stream);
+        let stream = unwrap_variant(stream);
         let stream = stream.downcast_ref::<zbus::zvariant::Structure>().ok()?;
         let stream_fields = stream.fields();
         if stream_fields.len() != 3 {

@@ -6,14 +6,13 @@
 //! 这里只负责接上 niri 的指针事件与 GLES 渲染。
 
 pub mod ba;
+pub mod effect_target;
 pub mod render;
 pub mod state;
 
 use std::time::Instant;
 
-use niri_config::misc::{
-    ClickTriggerButton, ClickTriggerType, CursorEffect as CursorEffectConfig,
-};
+use niri_config::misc::{ClickTriggerButton, ClickTriggerType, CursorEffect as CursorEffectConfig};
 use smithay::utils::{Logical, Point, Size};
 pub use state::{ClickTrigger, CursorEffectSettings, CursorEffectState, TriggerButton};
 
@@ -48,6 +47,123 @@ pub fn output_local_pointer(
     ))
 }
 
+/// 指定输出上的指针坐标与视口（P6）。与 `output_local_pointer` 不同，这里不
+/// 要求指针正好落在这块输出上：负坐标 / 越界坐标会原样保留，交给视口裁剪，
+/// 这样点击在屏幕交界处时，相邻输出的实例也能画出自己那一半。
+pub fn output_pointer_for(
+    niri: &Niri,
+    output: &smithay::output::Output,
+    global: Point<f64, Logical>,
+) -> Option<(FxPoint, Viewport)> {
+    let geometry = niri.global_space.output_geometry(output)?;
+    let scale = output.current_scale().fractional_scale();
+    let within = global - geometry.loc.to_f64();
+    let position = within.to_physical(scale);
+    let size: Size<i32, smithay::utils::Physical> = match output.current_mode() {
+        Some(mode) => mode.size,
+        None => {
+            let logical = geometry.size;
+            Size::from((
+                (logical.w as f64 * scale).round().max(1.0) as i32,
+                (logical.h as f64 * scale).round().max(1.0) as i32,
+            ))
+        }
+    };
+    Some((
+        FxPoint::new(position.x as f32, position.y as f32),
+        Viewport::new(size.w.max(1) as u32, size.h.max(1) as u32),
+    ))
+}
+
+/// 当前所有输出的 key（用于抬起 / 取消广播）。
+fn output_keys(niri: &Niri) -> Vec<String> {
+    niri.global_space
+        .outputs()
+        .map(|output| output.name())
+        .collect()
+}
+
+impl Niri {
+    /// 指针按下：把同一世界坐标广播到所有输出（P6）。
+    ///
+    /// 上游每个显示器会话都有独立的模拟实例；点击落在交界处时两块屏都会画出
+    /// 自己那一半爆裂，而不是被裁掉。这里用 `Output::name()` 路由。
+    pub fn cursor_effect_pointer_down(
+        &mut self,
+        global: Point<f64, Logical>,
+        now: Instant,
+        button: TriggerButton,
+    ) {
+        let targets: Vec<(String, FxPoint, Viewport)> = self
+            .global_space
+            .outputs()
+            .filter_map(|output| {
+                let (pos, viewport) = output_pointer_for(self, output, global)?;
+                Some((output.name(), pos, viewport))
+            })
+            .collect();
+        for (key, pos, viewport) in targets {
+            self.cursor_effect
+                .on_button_press_for(&key, pos, viewport, now, button);
+        }
+    }
+
+    /// 指针移动：同样广播到所有输出，跨屏拖尾因此连续。
+    pub fn cursor_effect_pointer_move(&mut self, global: Point<f64, Logical>, now: Instant) {
+        let targets: Vec<(String, FxPoint, Viewport)> = self
+            .global_space
+            .outputs()
+            .filter_map(|output| {
+                let (pos, viewport) = output_pointer_for(self, output, global)?;
+                Some((output.name(), pos, viewport))
+            })
+            .collect();
+        for (key, pos, viewport) in targets {
+            self.cursor_effect.on_move_for(&key, pos, viewport, now);
+        }
+    }
+
+    /// 指针抬起：所有输出一起结束拖尾。
+    pub fn cursor_effect_pointer_up(&mut self, now: Instant) {
+        for key in output_keys(self) {
+            self.cursor_effect.on_button_release_for(&key, now);
+        }
+    }
+
+    /// 指针取消：所有输出立即收尾。
+    pub fn cursor_effect_pointer_cancel(&mut self, now: Instant) {
+        for key in output_keys(self) {
+            self.cursor_effect.on_pointer_cancel_for(&key, now);
+        }
+    }
+}
+
+/// 环境门控的纯函数形式。
+///
+/// 原先把「全屏隐藏 / 桌面隐藏 / 锁屏 / 输出匹配」四件事内联在渲染路径里，
+/// 既不可单测，也容易在搬家时漏掉某一条。抽成纯函数之后，L1 可以跑完整的
+/// 7 布尔矩阵，断言「锁定必不画」「指针可见性不参与判定」。
+pub fn effect_should_render(
+    enabled: bool,
+    hide_in_fullscreen: bool,
+    show_on_desktop: bool,
+    under_fullscreen: bool,
+    under_window: bool,
+    locked: bool,
+    output_matches: bool,
+) -> bool {
+    if !enabled || locked || !output_matches {
+        return false;
+    }
+    if hide_in_fullscreen && under_fullscreen {
+        return false;
+    }
+    if !under_window && !show_on_desktop {
+        return false;
+    }
+    true
+}
+
 impl Niri {
     /// 把 `cursor-effect` 配置翻译成模拟参数。
     ///
@@ -63,21 +179,37 @@ impl Niri {
     /// - `tint` → 整体着色乘数（`255,255,255` 是原样）。
     /// - `disk` / `rings` / `shards` / `trail` / `glow` 五个子块 → 各图元的
     ///   尺寸、寿命、速度、透明度、辉光。全部是 1080p 参考像素 / 毫秒。
-    /// - `color` 被忽略：上游这个字段在 niri 侧没有对应实现，着色请用 `tint`。
+    /// - 上游的 `color` 字段已从 schema 删除（它从未参与渲染，N10）；着色请用 `tint`。
     /// - `trail-refresh-rate` → 拖尾的输入采样率（上游 `inputSamplingRateHz`）：> 0
-///   时按该频率采样指针事件，0 表示每个事件都采。
-/// - `apply-curve-draw` → 拖尾条带是否用 Catmull-Rom 补点（见 `VisualConfig::curve_draw`）。
-/// - `touch-mode` → 是否让触摸输入也驱动特效（见 `CursorEffectState::touch_mode`）。
+    ///   时按该频率采样指针事件，0 表示每个事件都采。
+    /// - `apply-curve-draw` → 拖尾条带是否用 Catmull-Rom 补点（见 `VisualConfig::curve_draw`）。
+    /// - `touch-mode` → 是否让触摸输入也驱动特效（见 `CursorEffectState::touch_mode`）。
     pub fn apply_cursor_effect_config(&mut self, cfg: &CursorEffectConfig) {
         self.cursor_effect.apply_settings(settings_from_config(cfg));
     }
 
+    /// 热重载路径：配置里的 `enabled` 只是**初始**状态，运行时的
+    /// `ToggleCursorEffect` 开关优先级更高（P5）。
+    pub fn apply_cursor_effect_config_reloading(&mut self, cfg: &CursorEffectConfig) {
+        let enabled = self.cursor_effect.enabled;
+        self.cursor_effect.apply_settings(settings_from_config(cfg));
+        self.cursor_effect.enabled = enabled;
+    }
+
     /// 每帧推进光标特效状态机；返回 `true` 表示仍有活动粒子，调用方据此决定
     /// 是否即便无其它 damage 也提交一帧。
+    ///
+    /// 注意这里**不再**调用 `on_frame_rendered`：推进发生在快照之前，回收必须
+    /// 发生在该帧真正提交之后（N17）。否则动画最后一帧会被提前回收，跳帧时
+    /// 还可能整段不显示。两个后端在提交成功后调用
+    /// [`Niri::cursor_effect_frame_rendered`]。
     pub fn advance_cursor_effect(&mut self, now: Instant) -> bool {
-        let alive = self.cursor_effect.advance(now);
+        self.cursor_effect.advance(now)
+    }
+
+    /// 一帧已经提交（或已被离线工具消费）之后调用，回收播完的实例。
+    pub fn cursor_effect_frame_rendered(&mut self, now: Instant) {
         self.cursor_effect.on_frame_rendered(now);
-        alive
     }
 }
 
@@ -103,25 +235,36 @@ fn trigger_button_from_config(button: ClickTriggerButton) -> TriggerButton {
 /// （左键 + 中键）。
 fn click_trigger_from_config(cfg: &CursorEffectConfig) -> ClickTrigger {
     if let Some(buttons) = &cfg.trigger_buttons {
-        return ClickTrigger::from_buttons(
-            buttons
-                .iter()
-                .map(|b| trigger_button_from_config(*b)),
-        );
+        return ClickTrigger::from_buttons(buttons.iter().map(|b| trigger_button_from_config(*b)));
     }
     let mut trigger = match cfg.click_trigger {
         ClickTriggerType::Left => ClickTrigger::single(TriggerButton::Left),
         ClickTriggerType::Right => ClickTrigger::single(TriggerButton::Right),
-        ClickTriggerType::Both => ClickTrigger::from_buttons([
-            TriggerButton::Left,
-            TriggerButton::Right,
-        ]),
+        ClickTriggerType::Both => {
+            ClickTrigger::from_buttons([TriggerButton::Left, TriggerButton::Right])
+        }
     };
     if cfg.enable_middle_click_trigger {
         trigger = trigger.with(TriggerButton::Middle);
     }
     trigger
 }
+
+/// 上游对每个数值参数都做过归一化（`simulation.cpp:105-160`）。niri 侧原先
+/// 完全没有这层，配置里多打一个零就能让合成器一次分配 50 万个环粒子，或者让
+/// 拖尾寿命涨到 5.5 小时（N19）。这里照抄上游常量做一次防御性钳制。
+fn finite_clamp(value: f64, min: f64, max: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        min
+    }
+}
+
+const LIFETIME_MIN_MS: f64 = 1.0;
+const LIFETIME_MAX_MS: f64 = 10_000.0;
+const EFFECT_RADIUS_MAX: f64 = 2_000.0;
+const RING_SPIN_MAX: f64 = 100.0;
 
 /// 把 `niri-config` 的 `cursor-effect` 解析结果翻译成模拟参数。
 ///
@@ -138,52 +281,175 @@ pub fn settings_from_config(cfg: &CursorEffectConfig) -> CursorEffectSettings {
     CursorEffectSettings {
         enabled: cfg.enabled,
         visual: ba::VisualConfig {
-            opacity: cfg.opacity as f32,
-            global_scale: cfg.scale as f32,
-            disk_radius: cfg.disk.radius as f32,
-            trail_width: cfg.trail.width as f32,
-            trail_opacity: cfg.trail.opacity as f32,
-            rings_hdr_intensity: cfg.rings.hdr_intensity as f32,
-            shards_hdr_intensity: cfg.shards.hdr_intensity as f32,
-            glow_gain: cfg.glow.gain as f32,
-            glow_trail_gain: cfg.glow.trail_gain as f32,
-            glow_radius: cfg.glow.radius as f32,
-            ring_inner_ratio: cfg.rings.inner_ratio as f32,
+            opacity: finite_clamp(cfg.opacity, 0.0, 1.0) as f32,
+            global_scale: finite_clamp(cfg.scale, 0.0, 64.0) as f32,
+            disk_radius: finite_clamp(cfg.disk.radius, 0.0, EFFECT_RADIUS_MAX) as f32,
+            trail_width: finite_clamp(cfg.trail.width, 0.0, 64.0) as f32,
+            trail_opacity: finite_clamp(cfg.trail.opacity, 0.0, 1.0) as f32,
+            rings_hdr_intensity: finite_clamp(cfg.rings.hdr_intensity, 0.0, 64.0) as f32,
+            shards_hdr_intensity: finite_clamp(cfg.shards.hdr_intensity, 0.0, 64.0) as f32,
+            glow_gain: finite_clamp(cfg.glow.gain, 0.0, 64.0) as f32,
+            glow_trail_gain: finite_clamp(cfg.glow.trail_gain, 0.0, 64.0) as f32,
+            glow_radius: finite_clamp(cfg.glow.radius, 0.0, 64.0) as f32,
+            ring_inner_ratio: finite_clamp(cfg.rings.inner_ratio, 0.0, 0.999_9) as f32,
             tint: [
-                cfg.tint.0[0] as f32 / 255.0,
-                cfg.tint.0[1] as f32 / 255.0,
-                cfg.tint.0[2] as f32 / 255.0,
+                finite_clamp(cfg.tint.0[0] as f64 / 255.0, 0.0, 1.0) as f32,
+                finite_clamp(cfg.tint.0[1] as f64 / 255.0, 0.0, 1.0) as f32,
+                finite_clamp(cfg.tint.0[2] as f64 / 255.0, 0.0, 1.0) as f32,
             ],
             curve_draw: cfg.apply_curve_draw,
         },
         click_particle: ba::curve::ClickParticleSettings {
-            disk_lifetime_ms: cfg.disk.lifetime as f32,
-            rings_count: cfg.rings.count,
-            rings_lifetime_ms: cfg.rings.lifetime as f32,
-            rings_radius_min: cfg.rings.radius_min as f32,
-            rings_radius_max: cfg.rings.radius_max as f32,
-            rings_angular_velocity_multiplier: cfg.rings.spin as f32,
-            rings_rotation_direction: cfg.rings.spin_direction as f32,
+            disk_lifetime_ms: finite_clamp(cfg.disk.lifetime, LIFETIME_MIN_MS, LIFETIME_MAX_MS)
+                as f32,
+            rings_count: cfg.rings.count.min(64),
+            rings_lifetime_ms: finite_clamp(cfg.rings.lifetime, LIFETIME_MIN_MS, LIFETIME_MAX_MS)
+                as f32,
+            rings_radius_min: finite_clamp(cfg.rings.radius_min, 0.0, EFFECT_RADIUS_MAX) as f32,
+            rings_radius_max: finite_clamp(cfg.rings.radius_max, 0.0, EFFECT_RADIUS_MAX) as f32,
+            rings_angular_velocity_multiplier: finite_clamp(cfg.rings.spin, 0.0, RING_SPIN_MAX)
+                as f32,
+            rings_rotation_direction: finite_clamp(cfg.rings.spin_direction, -1.0, 1.0) as f32,
         },
         shard_particle: ba::curve::ShardParticleSettings {
-            click_count: cfg.shards.count,
-            click_lifetime_min_ms: cfg.shards.lifetime_min as f32,
-            click_lifetime_max_ms: cfg.shards.lifetime_max as f32,
-            click_radius: cfg.shards.radius as f32,
-            click_speed_min: cfg.shards.speed_min as f32,
-            click_speed_max: cfg.shards.speed_max as f32,
-            size_min: cfg.shards.size_min as f32,
-            size_max: cfg.shards.size_max as f32,
+            click_count: cfg.shards.count.min(1000),
+            click_lifetime_min_ms: finite_clamp(
+                cfg.shards.lifetime_min,
+                LIFETIME_MIN_MS,
+                LIFETIME_MAX_MS,
+            ) as f32,
+            click_lifetime_max_ms: finite_clamp(
+                cfg.shards.lifetime_max,
+                LIFETIME_MIN_MS,
+                LIFETIME_MAX_MS,
+            ) as f32,
+            click_radius: finite_clamp(cfg.shards.radius, 0.0, EFFECT_RADIUS_MAX) as f32,
+            click_speed_min: finite_clamp(cfg.shards.speed_min, 0.0, EFFECT_RADIUS_MAX) as f32,
+            click_speed_max: finite_clamp(cfg.shards.speed_max, 0.0, EFFECT_RADIUS_MAX) as f32,
+            size_min: finite_clamp(cfg.shards.size_min, 0.0, EFFECT_RADIUS_MAX) as f32,
+            size_max: finite_clamp(cfg.shards.size_max, 0.0, EFFECT_RADIUS_MAX) as f32,
         },
         click_trigger: click_trigger_from_config(cfg),
         persistent_trail: cfg.enable_always_trail,
         hide_in_fullscreen: cfg.hide_in_fullscreen,
         show_on_desktop: cfg.show_on_desktop,
-        trail_length: cfg.trail.length as f32,
-        click_time_scale: click_speed as f32,
-        trail_time_scale: trail_speed as f32,
+        trail_length: finite_clamp(cfg.trail.length, 0.0, 33.3) as f32,
+        click_time_scale: finite_clamp(click_speed, 0.0, 100.0) as f32,
+        trail_time_scale: finite_clamp(trail_speed, 0.0, 100.0) as f32,
         trail_refresh_rate: cfg.trail_refresh_rate,
         touch_mode: cfg.touch_mode,
+    }
+}
+
+#[cfg(test)]
+mod structure_tests {
+    use super::effect_should_render;
+
+    /// N22：特效不能再被搬回 `render_pointer`（它会让指针隐藏 = 特效消失）。
+    #[test]
+    fn effect_not_inside_render_pointer() {
+        let src = include_str!("../niri.rs");
+        let rp = src.split("pub fn render_pointer").nth(1).unwrap();
+        let body = &rp[..rp.find("\n    pub fn ").unwrap_or(rp.len())];
+        assert!(
+            !body.contains("collect_render_elements"),
+            "特效又被打回 render_pointer 里了（N22）"
+        );
+        assert!(
+            src.contains("fn push_cursor_effect"),
+            "内容层的特效入口不见了"
+        );
+    }
+
+    /// N20：两个后端都必须在渲染前推进模拟，否则 winit 下永远不会出图。
+    #[test]
+    fn advance_called_from_both_backends() {
+        let tty = include_str!("../backend/tty.rs");
+        let winit = include_str!("../backend/winit.rs");
+        assert!(tty.contains("advance_cursor_effect"));
+        assert!(
+            winit.contains("advance_cursor_effect"),
+            "winit 后端没有推进光标特效（N20）"
+        );
+    }
+
+    /// N22/L3 退路：内容层特效调用必须出现在锁屏分支之前，且锁屏时跳过。
+    #[test]
+    fn effect_push_is_before_locked_branch() {
+        let src = include_str!("../niri.rs");
+        let call = src
+            .find("self.push_cursor_effect(ctx.renderer, output, push)")
+            .expect("render_inner 必须调用 push_cursor_effect");
+        assert!(
+            src[call..].contains("if self.is_locked()"),
+            "锁屏分支必须位于特效调用之后，否则锁屏仍会绘制粒子"
+        );
+        assert!(
+            src[..call].contains("self.cursor_effect.set_visible(false)"),
+            "锁屏时必须把可见性置 false（N21）"
+        );
+    }
+
+    /// N21：`has_work_any` 必须同时检查每个 slot 的可见性与活动实例。
+    #[test]
+    fn has_work_checks_visibility() {
+        let src = include_str!("state.rs");
+        assert!(
+            src.contains("slot.visible.get() && slot.runtime.active()"),
+            "has_work 又只看实例数量了（N21）"
+        );
+    }
+
+    /// L3 运行时矩阵（T1–T4）：在 state/门控层复现 §12.5 的运行时决策。
+    ///
+    /// 这不是完整 Niri headless（构造 Niri 需要 State/Wayland/seat），而是与
+    /// L1 的 2^7 矩阵、L4 结构守卫互补的运行时验证；T1–T4 的结论都能在本
+    /// 测试里直接观察到。
+    #[test]
+    fn l3_t1_t4_runtime_matrix() {
+        // T1：指针隐藏仍出特效。`effect_should_render` 的签名里没有
+        // pointer_visibility，任何“光标不可见”状态都无法把结果翻成 false。
+        assert!(effect_should_render(
+            true, false, true, false, true, false, true
+        ));
+
+        // T2：winit/TTY 共同推进路径：点击后 advance_all 必须要求出帧。
+        let mut state = crate::cursor_effect::state::CursorEffectState::default();
+        let start = std::time::Instant::now();
+        state.set_time_origin(start);
+        state.on_button_press(
+            crate::cursor_effect::ba::Point::new(100.0, 100.0),
+            start,
+            crate::cursor_effect::state::TriggerButton::Left,
+        );
+        assert!(
+            state.advance_all(start + std::time::Duration::from_millis(16)),
+            "T2: advance_all 应返回 true"
+        );
+
+        // T3：打字/闲置把可见性置 false 后，不再空转并清空实例。
+        state.set_visible(false);
+        assert!(!state.has_work_any(), "T3: 不可见时 has_work 必须 false");
+        assert!(!state.advance_all(start + std::time::Duration::from_millis(32)));
+        assert!(!state.has_content(), "T3: 不可见时应就地清空");
+
+        // T4：全屏隐藏。
+        assert!(!effect_should_render(
+            true, true, true, true, true, false, true
+        ));
+        assert!(effect_should_render(
+            true, false, true, false, true, false, true
+        ));
+    }
+
+    /// N14：`trail { width }` 必须作用到真正被渲染的 stroke 宽度。
+    #[test]
+    fn trail_width_applied_to_strokes() {
+        let src = include_str!("ba/mod.rs");
+        assert!(
+            src.contains("snapshot.trail_strokes"),
+            "trail width 又只乘兼容字段了（N14）"
+        );
     }
 }
 
@@ -233,7 +499,7 @@ mod tests {
         assert!(settings.touch_mode);
 
         let default = settings_from_config(&config(""));
-        assert_eq!(default.trail_refresh_rate, 40);
+        assert_eq!(default.trail_refresh_rate, 0);
         assert!(!default.visual.curve_draw);
         assert!(!default.touch_mode);
         // 两处默认必须一致：实机走 `settings_from_config`（niri-config 的 40），
@@ -362,11 +628,11 @@ mod tests {
     /// `trigger-buttons` 的三种写法：不写 / 写几个 / 写成空的。
     #[test]
     fn trigger_buttons_from_config() {
-        // 不写 → 上游默认（左键 + 中键）。
+        // 不写 → 上游默认（左键 + 右键）。
         let default = settings_from_config(&config("cursor-effect {}"));
         assert!(default.click_trigger.accepts(TriggerButton::Left));
-        assert!(default.click_trigger.accepts(TriggerButton::Middle));
-        assert!(!default.click_trigger.accepts(TriggerButton::Right));
+        assert!(default.click_trigger.accepts(TriggerButton::Right));
+        assert!(!default.click_trigger.accepts(TriggerButton::Middle));
         assert!(!default.click_trigger.accepts(TriggerButton::Back));
 
         // 显式列表**完全接管**，不再被 click-trigger / 中键开关加回去。
@@ -403,6 +669,78 @@ mod tests {
         assert!(aliased.click_trigger.accepts(TriggerButton::Left));
         assert!(aliased.click_trigger.accepts(TriggerButton::Middle));
         assert!(aliased.click_trigger.accepts(TriggerButton::Forward));
+    }
+
+    /// N19 回归：上游对每个数值参数都钳制，niri 侧不能把 50 万个环粒子
+    /// 原样塞进模拟，否则一次点击就能冻结合成器。
+    #[test]
+    fn settings_clamped_to_upstream_limits() {
+        let settings = settings_from_config(&config(
+            r#"
+            cursor-effect {
+                scale 60000
+                rings {
+                    count 500000
+                    lifetime 2000000000
+                    radius-min 60000
+                    radius-max 60000
+                    spin 2000000000
+                }
+                shards {
+                    count 500000
+                    lifetime-min 2000000000
+                    lifetime-max 2000000000
+                }
+                trail {
+                    length 60000
+                }
+            }
+            "#,
+        ));
+        assert!(settings.click_particle.rings_count <= 64);
+        assert!(settings.shard_particle.click_count <= 1000);
+        assert!(settings.click_particle.disk_lifetime_ms <= 10_000.0);
+        assert!(settings.click_particle.rings_lifetime_ms <= 10_000.0);
+        assert!(settings.shard_particle.click_lifetime_min_ms <= 10_000.0);
+        assert!(settings.shard_particle.click_lifetime_max_ms <= 10_000.0);
+        assert!(settings.click_particle.rings_radius_min <= 2000.0);
+        assert!(settings.click_particle.rings_radius_max <= 2000.0);
+        assert!(settings.click_particle.rings_angular_velocity_multiplier <= 100.0);
+        assert!(settings.trail_length <= 33.3);
+        assert!(settings.visual.global_scale <= 64.0);
+        // 下限同样是防御：0 寿命会让粒子在生成的同一帧消失，配置钳到 1ms。
+        let zero = settings_from_config(&config(
+            r#"
+            cursor-effect {
+                disk {
+                    lifetime 0
+                }
+                rings {
+                    lifetime 0
+                }
+            }
+            "#,
+        ));
+        assert!(zero.click_particle.disk_lifetime_ms >= 1.0);
+        assert!(zero.click_particle.rings_lifetime_ms >= 1.0);
+    }
+
+    /// N22/L1：门控纯函数必须覆盖完整的 7 布尔矩阵。
+    #[test]
+    fn effect_gating_matrix() {
+        for bits in 0u32..(1 << 7) {
+            let enabled = bits & 1 != 0;
+            let hide = bits & 2 != 0;
+            let desktop = bits & 4 != 0;
+            let fullscreen = bits & 8 != 0;
+            let window = bits & 16 != 0;
+            let locked = bits & 32 != 0;
+            let output = bits & 64 != 0;
+            let got =
+                effect_should_render(enabled, hide, desktop, fullscreen, window, locked, output);
+            let want = enabled && !locked && output && !(hide && fullscreen) && (window || desktop);
+            assert_eq!(got, want, "bits={bits:07b}");
+        }
     }
 
     /// 旧写法仍然生效：`click-trigger right` + 关掉中键。

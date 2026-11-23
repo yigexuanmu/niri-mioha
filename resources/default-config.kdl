@@ -304,39 +304,39 @@ hotkey-overlay {
 //     // Master switch. Also toggled at runtime by the `toggle-cursor-effect` action.
 //     enabled true
 //     // Effect scale and overall opacity. `scale 1.0` reproduces the upstream
-//     // effect at its original size; the default 1.5 enlarges everything by half.
-//     scale 1.5
+//     // effect at its original size.
+//     scale 1.0
 //     opacity 1.0
 //     // Per-channel color multiplier applied to every element: "R,G,B", "#rrggbb"
 //     // or "rgb(...)". White (the default) keeps the original artwork colors. It
 //     // multiplies each channel independently, so it dims and skews the colors
 //     // rather than replacing them: no tint can turn the blue artwork warm.
 //     tint "255,255,255"
-//     // `color` is kept for BASpark config compatibility and does not affect
-//     // rendering; use `tint` above to recolor the effect.
-//     color "45,175,255"
 //     // Animation speed. With use-linked-animation-speed (default), trail and
 //     // click both follow effect-speed; otherwise trail-speed/click-speed apply.
 //     use-linked-animation-speed true
 //     effect-speed 1.0
 //     trail-speed 1.0
 //     click-speed 1.0
-//     // Trail sampling rate in Hz (0 = sample every motion event).
-//     trail-refresh-rate 40
+//     // Trail sampling rate in Hz (0 = sample every motion event, matching
+//     // upstream's per-event sampling).
+//     trail-refresh-rate 0
 //     // Draw a trail even when no button is held.
 //     enable-always-trail false
 //     // Fit the trail ribbon through a Catmull-Rom curve instead of straight
 //     // segments between samples.
 //     apply-curve-draw false
 //     // Which buttons trigger a burst: "left", "right" or "both".
-//     click-trigger "left"
-//     enable-middle-click-trigger true
+//     // Upstream triggers on left + right.
+//     click-trigger "both"
+//     enable-middle-click-trigger false
 //     // Explicit list of triggering buttons, overrides the two lines above.
 //     // Accepts: left / right / middle / back / forward / side / extra / task.
 //     // An empty `trigger-buttons` node triggers on nothing (trail only).
 //     // trigger-buttons "left" "middle"
 //     // Hide the effect over fullscreen windows, or on a workspace with no windows.
-//     hide-in-fullscreen true
+//     // Upstream never hides over fullscreen windows.
+//     hide-in-fullscreen false
 //     show-on-desktop true
 //     // Let touch input drive the effect (press = burst, move = trail).
 //     touch-mode false

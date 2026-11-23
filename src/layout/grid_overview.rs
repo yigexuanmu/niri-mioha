@@ -254,7 +254,7 @@ impl<W: LayoutElement> GridOverview<W> {
     }
 
     pub fn is_animation(&self) -> bool {
-        self.progress.as_ref().map_or(false, |p| p.is_moving()) || self.rearrange_anim.is_some()
+        self.progress.as_ref().is_some_and(|p| p.is_moving()) || self.rearrange_anim.is_some()
     }
 
     /// Shows the grid `value` of the way open, following a touchpad gesture.
@@ -1415,7 +1415,7 @@ impl<W: LayoutElement> GridOverview<W> {
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        self.progress.as_ref().map_or(false, |p| p.is_animation())
+        self.progress.as_ref().is_some_and(|p| p.is_animation())
             || self.rearrange_anim.is_some()
             || self.minimized_highlights_animating()
             || self.focus_rings_animating()

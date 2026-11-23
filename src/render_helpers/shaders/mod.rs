@@ -8,6 +8,7 @@ use smithay::backend::renderer::gles::{
 
 use super::renderer::NiriRenderer;
 use super::shader_element::ShaderProgram;
+use crate::render_helpers::bloom::BloomPrograms;
 use crate::render_helpers::blur::BlurProgram;
 
 pub struct Shaders {
@@ -18,6 +19,8 @@ pub struct Shaders {
     pub resize: Option<ShaderProgram>,
     pub gradient_fade: Option<GlesTexProgram>,
     pub blur: Option<BlurProgram>,
+    /// 光标特效的 Bloom 金字塔程序（BrightPass / downsample / upsample / transport）。
+    pub bloom: Option<std::rc::Rc<BloomPrograms>>,
     /// 光标特效材质 shader（圆盘/溶解环/三角碎片/拖尾，见 `cursor_effect.frag`）。
     ///
     /// 与 custom_resize/close/open 不同，这个程序只由本 crate 的
@@ -159,6 +162,13 @@ impl Shaders {
             })
             .ok();
 
+        let bloom = BloomPrograms::compile(renderer)
+            .map(std::rc::Rc::new)
+            .map_err(|err| {
+                warn!("error compiling bloom shaders: {err:?}");
+            })
+            .ok();
+
         // 光标特效材质 shader。frag 里用到的每个 uniform 都必须在这里注册，
         // 否则 smithay 绘制时查不到 location → UnknownUniform panic。
         let cursor_effect = ShaderProgram::compile(
@@ -218,6 +228,7 @@ impl Shaders {
             resize,
             gradient_fade,
             blur,
+            bloom,
             cursor_effect,
             cursor_effect_textures,
             custom_resize: RefCell::new(None),

@@ -104,7 +104,13 @@ pub fn apply_visual_config(snapshot: &mut Snapshot, config: &VisualConfig) {
 
     snapshot.trail_opacity *= config.trail_opacity;
     apply_global_scale(snapshot, config.global_scale);
+    // N14：`trail { width }` 的真正消费路径是 `snapshot.strokes()`。运行时
+    // `merge()` 总把单实例拖尾折成 `trail_strokes`，只乘兼容字段 `trail_width`
+    // 的话，渲染永远读不到这个倍率。上游对两份都乘，这里照做。
     snapshot.trail_width *= config.trail_width;
+    for stroke in &mut snapshot.trail_strokes {
+        stroke.width *= config.trail_width;
+    }
 }
 
 /// 点击爆裂与碎片的默认参数（上游 `EffectsConfig` 的恒等默认值）。
@@ -137,6 +143,42 @@ mod tests {
             assert!((a.intensity - b.intensity).abs() < 1e-4);
         }
         assert!((plain.trail_width - configured.trail_width).abs() < 1e-6);
+    }
+
+    /// N14 回归：配置倍率必须落到**真正被渲染的** `strokes()` 上。
+    #[test]
+    fn trail_width_reaches_render_field() {
+        let viewport = Viewport::new(1920, 1080);
+        let mut sim = Simulation::default();
+        sim.pointer_down(Point::new(400.0, 300.0), viewport, 0.0);
+        sim.advance(0.016);
+        let mut time = 0.016;
+        for _ in 0..8 {
+            time += 0.016;
+            sim.pointer_move(
+                Point::new(400.0 + time as f32 * 200.0, 300.0),
+                viewport,
+                time,
+            );
+            sim.advance(time);
+        }
+        let base = sim.snapshot(viewport, time);
+        assert!(!base.strokes().is_empty(), "拖动后应有拖尾笔画");
+        let base_width = base.strokes()[0].1;
+
+        let mut configured = base.clone();
+        apply_visual_config(
+            &mut configured,
+            &VisualConfig {
+                trail_width: 2.0,
+                ..Default::default()
+            },
+        );
+        let widths: Vec<f32> = configured.strokes().iter().map(|s| s.1).collect();
+        assert!(
+            widths.iter().all(|w| (w - base_width * 2.0).abs() < 1e-3),
+            "trail width 没有落到 strokes()：{widths:?}"
+        );
     }
 
     #[test]

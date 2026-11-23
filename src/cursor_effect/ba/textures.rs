@@ -20,7 +20,8 @@ pub fn center_disk() -> &'static FxTexture {
     CELL.get_or_init(|| FxTexture {
         width: 512,
         height: 512,
-        rgba: decompress_block(include_bytes!("../ba_data/center_disk.lz4"), 512 * 512 * 4),
+        rgba: decompress_block(include_bytes!("../ba_data/center_disk.lz4"), 512 * 512 * 4)
+            .expect("center_disk.lz4 必须可解码"),
     })
 }
 
@@ -33,7 +34,8 @@ pub fn dissolve_ring() -> &'static FxTexture {
         rgba: decompress_block(
             include_bytes!("../ba_data/dissolve_ring.lz4"),
             256 * 128 * 4,
-        ),
+        )
+        .expect("dissolve_ring.lz4 必须可解码"),
     })
 }
 
@@ -46,7 +48,8 @@ pub fn triangle_atlas() -> &'static FxTexture {
         rgba: decompress_block(
             include_bytes!("../ba_data/triangle_atlas.lz4"),
             256 * 128 * 4,
-        ),
+        )
+        .expect("triangle_atlas.lz4 必须可解码"),
     })
 }
 
@@ -56,6 +59,7 @@ pub fn trail() -> &'static FxTexture {
     CELL.get_or_init(|| FxTexture {
         width: 512,
         height: 512,
-        rgba: decompress_block(include_bytes!("../ba_data/trail.lz4"), 512 * 512 * 4),
+        rgba: decompress_block(include_bytes!("../ba_data/trail.lz4"), 512 * 512 * 4)
+            .expect("trail.lz4 必须可解码"),
     })
 }

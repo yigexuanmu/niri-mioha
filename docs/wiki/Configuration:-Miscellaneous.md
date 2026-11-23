@@ -266,28 +266,28 @@ animations {
 <sup>Since: 26.04 (fork)</sup>
 
 Cursor click effects: a disk, dissolve rings and triangular shards on click, plus a light trail
-while dragging. The compositor draws them itself with GLES as vector shapes with an analytic
-bloom approximation, so no external program is needed.
+while dragging. The compositor draws them itself with GLES as vector shapes, using an FP16 direct/seed target
+and a Unity-style Bloom mip pyramid (no analytic bloom approximation), so no external program is needed.
 
 Every setting is optional; the defaults are shown below.
 
 ```kdl
 cursor-effect {
     enabled true
-    scale 1.5
+    scale 1.0
     opacity 1.0
     tint "255,255,255"
     use-linked-animation-speed true
     effect-speed 1.0
     trail-speed 1.0
     click-speed 1.0
-    trail-refresh-rate 40
+    trail-refresh-rate 0
     enable-always-trail false
     apply-curve-draw false
-    click-trigger "left"
-    enable-middle-click-trigger true
+    click-trigger "both"
+    enable-middle-click-trigger false
     trigger-buttons "left" "middle"
-    hide-in-fullscreen true
+    hide-in-fullscreen false
     show-on-desktop true
     touch-mode false
 
@@ -321,19 +321,14 @@ cursor-effect {
         opacity 1.0
         length 1.0
     }
-    glow {
-        gain 1.0
-        radius 1.0
-        trail-gain 1.0
-    }
 }
 ```
 
 **Units.** Every length is a *1080p reference pixel*: the effect is scaled to the output height, so the
 same numbers look identical on a 4K screen. Every duration is in milliseconds.
 
-Each of the five blocks (`disk`, `rings`, `shards`, `trail`, `glow`) may appear **at most once** in a
-`cursor-effect` block, and you only need to write the fields you want to change. Setting a count or an
+Each of the four blocks (`disk`, `rings`, `shards`, `trail`) may appear **at most once** in a
+`cursor-effect` block (`glow` is deprecated and ignored), and you only need to write the fields you want to change. Setting a count or an
 intensity to `0` removes that element entirely, so you can keep just the parts you like — with one
 exception: `shards count` only controls the shards of the click burst, while the small shards scattered
 along the trail belong to the trail and disappear with `trail opacity 0`.
@@ -343,22 +338,21 @@ along the trail belong to the trail and disappear with `trail opacity 0`.
 - `enabled` — master switch; the `toggle-cursor-effect` action flips it at runtime without editing the config.
   Setting `enabled false` and reloading the config disables the effect completely, including all rendering work.
 - `scale`, `opacity` — size and transparency of the whole effect. `scale 1.0` reproduces the upstream
-  effect at its original size; the default `1.5` enlarges everything by half.
+  effect at its original size (the upstream default and the niri default).
 - `tint` — per-channel color multiplier applied to the disk, rings, shards and trail: `"R,G,B"`,
   `"#rrggbb"`, or `"rgb(...)"`. White (the default) keeps the original artwork colors. Note that
   this multiplies each channel independently, so it darkens and skews the existing colors rather
   than replacing them: `"#808080"` dims everything, but no tint can turn the blue artwork warm.
-- `color` — kept for BASpark config compatibility and **does not affect rendering**; use `tint` instead.
 - `use-linked-animation-speed` — when `true` (the default), the trail and the click burst both follow
   `effect-speed`; set it to `false` to use `trail-speed` and `click-speed` separately.
-- `trail-refresh-rate` — how often (in Hz) pointer motion is sampled for the trail. `0` samples
-  every motion event. The first motion after a press is always sampled, regardless of the rate.
+- `trail-refresh-rate` — how often (in Hz) pointer motion is sampled for the trail. `0` (the default)
+  samples every motion event. The first motion after a press is always sampled, regardless of the rate.
 - `apply-curve-draw` — fit the trail ribbon through a Catmull-Rom curve instead of straight
   segments between samples. Useful at low refresh rates with fast pointer motion, where the
   polyline corners become visible.
 - `enable-always-trail` — draw a trail even while no button is held.
-- `click-trigger` — which buttons produce a burst: `"left"`, `"right"`, or `"both"`.
-- `enable-middle-click-trigger` — whether the middle button produces a burst (and a trail while held).
+- `click-trigger` — which buttons produce a burst: `"left"`, `"right"`, or `"both"` (default: `both`).
+- `enable-middle-click-trigger` — whether the middle button produces a burst (default: `false`).
 - `trigger-buttons` — an explicit list of mouse buttons that trigger the burst, e.g.
   `trigger-buttons "left" "middle"` or `trigger-buttons "right" "back"`. Accepted names:
   `"left"`, `"right"`, `"middle"`, `"back"`, `"forward"`, `"side"`, `"extra"`, `"task"`
@@ -366,7 +360,7 @@ along the trail belong to the trail and disappear with `trail opacity 0`.
   When this appears it **fully replaces** `click-trigger` and `enable-middle-click-trigger`,
   so `trigger-buttons "right"` really does disable the left-button burst. An empty node
   (`trigger-buttons`) triggers on nothing, which is handy when you only want the trail.
-- `hide-in-fullscreen` — hide the effect while the pointer is over a fullscreen window.
+- `hide-in-fullscreen` — hide the effect while the pointer is over a fullscreen window (default: `false`).
 - `show-on-desktop` — show the effect on a workspace with no windows.
 - `touch-mode` — let touch input drive the effect: touching the screen presses (burst + trail
   anchor), moving a finger draws the trail, lifting the finger ends the stroke. Without it the
@@ -410,16 +404,11 @@ The light ribbon left behind while the pointer moves.
 - `opacity` — opacity multiplier; `0` drops the trail entirely while keeping the click burst.
 - `length` — length multiplier (`0` to about `33.3`).
 
-#### `glow`
+#### `glow` (deprecated)
 
-The soft haze around every element (our approximation of the upstream Bloom pass).
-
-- `gain` — overall glow gain; `0` turns the halo off and leaves only the solid shapes.
-- `radius` — haze radius multiplier; larger values spread the fog further.
-- `trail-gain` — *extra* gain applied only to the trail's haze, on top of `gain`. The trail covers far
-  more screen area than the click burst, and the two want different amounts of fog: a lower `gain` makes
-  slow drags feel lighter but also dims the click glow, which is the main part of the click effect.
-  Write `gain 1.0` with `trail-gain 0.55` to keep clicks untouched while thinning the trail.
+`glow` is kept only for old BASpark configs. Since the P2/P3 rewrite, the halo is produced by the
+whole-frame Bloom pyramid rather than per-element analytic glow, so `gain`, `radius` and `trail-gain`
+no longer affect rendering. Tune `hdr-intensity` and `tint` instead.
 
 To toggle it from a key binding, see the `toggle-cursor-effect` action in
 [Key Bindings](./Configuration:-Key-Bindings.md).

@@ -499,6 +499,6 @@ mod tests {
         let snapshot = runtime.snapshot(viewport(), 0.11);
         let queues: Vec<i32> = snapshot.sprites.iter().map(|s| s.render_queue).collect();
         assert!(queues.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(snapshot.trail_strokes.len() >= 1);
+        assert!(!snapshot.trail_strokes.is_empty());
     }
 }

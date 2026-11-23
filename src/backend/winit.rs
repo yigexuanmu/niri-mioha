@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::mem;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::Context as _;
 use niri_config::{Config, OutputName};
@@ -307,6 +308,11 @@ impl Winit {
     pub fn render(&mut self, niri: &mut Niri, output: &Output) -> RenderResult {
         let _span = tracy_client::span!("Winit::render");
 
+        // 光标特效：winit 后端原先完全不推进模拟（N20），于是首次点击后
+        // `has_work()` 恒真、每帧重绘，而屏幕上什么也画不出来。推进放在两个
+        // 后端共同的渲染入口前，和 TTY 路径同构。
+        let _ = niri.advance_cursor_effect(Instant::now());
+
         // Render the elements.
         let ctx = RenderCtx {
             renderer: self.backend.renderer(),
@@ -351,6 +357,9 @@ impl Winit {
             }
 
             self.backend.submit(Some(damage)).unwrap();
+
+            // 提交成功之后才回收粒子（N17），保证最后一帧真的画完。
+            niri.cursor_effect_frame_rendered(Instant::now());
 
             let mut presentation_feedbacks = niri.take_presentation_feedbacks(output, &res.states);
             presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(

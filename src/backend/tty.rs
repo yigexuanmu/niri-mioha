@@ -2007,6 +2007,8 @@ impl Tty {
 
                     match drm_compositor.queue_frame(data) {
                         Ok(()) => {
+                            // 提交成功后才回收粒子（N17）。
+                            niri.cursor_effect_frame_rendered(Instant::now());
                             let output_state = niri.output_state.get_mut(output).unwrap();
                             let new_state = RedrawState::WaitingForVBlank {
                                 redraw_needed: false,

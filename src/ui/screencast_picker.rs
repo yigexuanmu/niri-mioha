@@ -1493,7 +1493,7 @@ mod enabled {
         let grid_height = card_height * actual_rows as f64 + CARD_GAP * (actual_rows - 1) as f64;
         let grid_y = metrics.cards_top + (available_height - grid_height).max(0.) / 2.;
 
-        let cards = (0..visible_count)
+        (0..visible_count)
             .map(|local_index| {
                 let index = first_index + local_index;
                 let row = local_index / columns;
@@ -1509,8 +1509,7 @@ mod enabled {
                     Rectangle::new(Point::from((x, y)), Size::from((card_width, card_height))),
                 )
             })
-            .collect();
-        cards
+            .collect()
     }
 
     fn effective_scroll_row(

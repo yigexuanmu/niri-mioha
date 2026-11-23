@@ -428,9 +428,11 @@ where
             }
             match &*arg.literal {
                 knuffel::ast::Literal::String(s) => {
-                    out.push(ClickTriggerButton::from_str(s).map_err(|e| {
-                        knuffel::errors::DecodeError::conversion(&arg.literal, e)
-                    })?);
+                    out.push(
+                        ClickTriggerButton::from_str(s).map_err(|e| {
+                            knuffel::errors::DecodeError::conversion(&arg.literal, e)
+                        })?,
+                    );
                 }
                 _ => ctx.emit_error(knuffel::errors::DecodeError::unexpected(
                     &arg.literal,
@@ -747,12 +749,10 @@ impl MergeWith<CursorEffectGlowPart> for CursorEffectGlow {
 pub struct CursorEffect {
     /// IsEffectEnabled（总开关，默认 true）。写 `enabled false` 关闭。
     pub enabled: bool,
-    /// EffectScale（默认 1.5）。
+    /// EffectScale（默认 1.0，即上游原尺寸）。
     pub scale: f64,
     /// EffectOpacity（默认 1.0）。
     pub opacity: f64,
-    /// ParticleColor（默认 "45,175,255"）。
-    pub color: ParticleColor,
     /// UseLinkedAnimationSpeed（默认 true：trail/click 都跟随 effect_speed）。
     pub use_linked_animation_speed: bool,
     /// EffectSpeed（默认 1.0，动画速度基准）。
@@ -761,22 +761,22 @@ pub struct CursorEffect {
     pub trail_speed: f64,
     /// ClickAnimationSpeed（默认 1.0，use_linked 时被忽略）。
     pub click_speed: f64,
-    /// TrailRefreshRate（默认 40，拖尾采样 Hz）。
+    /// TrailRefreshRate（默认 0：每个指针事件都采样）。
     pub trail_refresh_rate: u32,
     /// EnableAlwaysTrailEffect（默认 false：仅按下时拖尾）。
     pub enable_always_trail: bool,
     /// ApplyCurveDraw（默认 false）。
     pub apply_curve_draw: bool,
-    /// EnableMiddleClickTrigger（默认 false）。
+    /// EnableMiddleClickTrigger（默认 false；上游左+右触发）。
     pub enable_middle_click_trigger: bool,
-    /// ClickTriggerType（默认 Left）。
+    /// ClickTriggerType（默认 Both：左键 + 右键，上游键位）。
     pub click_trigger: ClickTriggerType,
     /// 显式列出哪些鼠标键触发点击爆裂（`trigger-buttons "left" "middle"`）。
     ///
     /// `Some` 时**完全覆盖** `click-trigger` / `enable-middle-click-trigger`
     /// 这两项（它们是为兼容上游 BASpark 配置保留的）；`None` 时按旧逻辑合成。
     pub trigger_buttons: Option<Vec<ClickTriggerButton>>,
-    /// HideInFullscreen（默认 true：全屏下单屏隐藏）。
+    /// HideInFullscreen（默认 false：上游不按全屏过滤）。
     pub hide_in_fullscreen: bool,
     /// ShowEffectOnDesktop（默认 true：桌面单屏显示）。
     pub show_on_desktop: bool,
@@ -784,8 +784,8 @@ pub struct CursorEffect {
     pub touch_mode: bool,
     /// 整体着色乘数（默认 `255,255,255` = 保留美术原色）。
     ///
-    /// 与 `color` 的区别：`color` 是上游 BASpark 预留的字段，niri 侧不参与渲染；
-    /// 想调色请用这里。
+    /// 注意：上游 BASpark 的 `color` 字段已从 schema 删除（它从未参与渲染，
+    /// 留着会被当成 bug，N10）。调色请用这里。
     ///
     /// 语义是**逐通道相乘**，不是换色相：`tint "#808080"` 把整条特效压暗一半，
     /// `tint "#ffddbb"` 让蓝通道略降、画面偏暖一点点。乘积会保留各通道的相对
@@ -808,20 +808,19 @@ impl Default for CursorEffect {
     fn default() -> Self {
         Self {
             enabled: true,
-            scale: 1.5,
+            scale: 1.0,
             opacity: 1.0,
-            color: ParticleColor::default(),
             use_linked_animation_speed: true,
             effect_speed: 1.0,
             trail_speed: 1.0,
             click_speed: 1.0,
-            trail_refresh_rate: 40,
+            trail_refresh_rate: 0,
             enable_always_trail: false,
             apply_curve_draw: false,
-            enable_middle_click_trigger: true,
-            click_trigger: ClickTriggerType::Left,
+            enable_middle_click_trigger: false,
+            click_trigger: ClickTriggerType::Both,
             trigger_buttons: None,
-            hide_in_fullscreen: true,
+            hide_in_fullscreen: false,
             show_on_desktop: true,
             touch_mode: false,
             tint: ParticleColor([255, 255, 255]),
@@ -839,9 +838,6 @@ pub struct CursorEffectPart {
     /// `enabled`（裸值=true 开启）或 `enabled false`（关闭）。
     #[knuffel(child)]
     pub enabled: Option<Flag>,
-    /// `color "45,175,255"` 或 `color "#2dafff"`。
-    #[knuffel(child)]
-    pub color: Option<ParticleColor>,
     /// `use-linked-animation-speed false` 关闭链式速度。
     #[knuffel(child)]
     pub use_linked_animation_speed: Option<Flag>,
@@ -920,9 +916,6 @@ impl MergeWith<CursorEffectPart> for CursorEffect {
         // u32 ← Option<u32> / copy types，直接覆盖。
         if let Some(x) = &part.trail_refresh_rate {
             self.trail_refresh_rate = *x;
-        }
-        if let Some(x) = &part.color {
-            self.color = *x;
         }
         if let Some(x) = &part.click_trigger {
             self.click_trigger = *x;

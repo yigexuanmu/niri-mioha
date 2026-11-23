@@ -475,10 +475,7 @@ pub(super) fn popup_surfaces(mapped: &Mapped) -> Vec<(f64, f64)> {
         .filter_map(|(popup, offset)| match popup {
             PopupKind::Xdg(ref xdg) => {
                 let origin = offset - popup.geometry().loc;
-                Some((
-                    popup_depth(&xdg),
-                    (f64::from(origin.x), f64::from(origin.y)),
-                ))
+                Some((popup_depth(xdg), (f64::from(origin.x), f64::from(origin.y))))
             }
             _ => None,
         })

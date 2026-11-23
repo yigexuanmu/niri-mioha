@@ -36,7 +36,7 @@ yigexuanmu/niri-mioha         ← 本仓库，只加光标特效与按键行为�
 - **溶解环**：从盘边扩出的细白环，随时间溶解成断点和新月弧；内侧有一层柔光，盘退场后仍可见。
 - **三角碎片**：从点击点向外飞溅的青色三角形，颜色随生命期由白转青再淡出。
 - **拖尾**：按住鼠标拖动产生的光带，带近场亮边与远场残尾，颜色沿笔画方向渐变。
-- **光晕**：每个元素外侧的 Bloom 近似，由解析高斯 mip 链构成，不使用 HDR 帧缓冲（niri 不支持 HDR）。
+- **光晕**：整帧 FP16 direct/seed + BrightPass + mip 金字塔的真 Bloom（与上游 Unity Bloom 同构），不再使用解析高斯近似。
 
 #### 配置
 
@@ -46,26 +46,25 @@ yigexuanmu/niri-mioha         ← 本仓库，只加光标特效与按键行为�
 ```kdl
 cursor-effect {
     enabled true                      // 总开关，也可用 toggle-cursor-effect 动作运行时切换
-    scale 1.5                         // 整体缩放，1.0 = 上游原尺寸
+    scale 1.0                         // 整体缩放，1.0 = 上游原尺寸
     opacity 1.0                       // 整体不透明度
     tint "255,255,255"                // 每通道颜色倍率：R,G,B / #rrggbb / rgb(...)，白色保持原色
-    color "45,175,255"                // 仅兼容 BASpark 旧配置，不影响渲染，改色请用 tint
 
     use-linked-animation-speed true   // true：拖尾与点击共用 effect-speed
     effect-speed 1.0
     trail-speed 1.0                   // use-linked 为 false 时生效
     click-speed 1.0                   // use-linked 为 false 时生效
-    trail-refresh-rate 40             // 拖尾采样频率 Hz，0 = 每次运动事件都采样
+    trail-refresh-rate 0              // 拖尾采样频率 Hz，0 = 每次运动事件都采样（上游默认）
     enable-always-trail false         // 不按键也常显拖尾
     apply-curve-draw false            // 拖尾用 Catmull-Rom 曲线而非直线段
 
-    click-trigger "left"              // left / right / both
-    enable-middle-click-trigger true  // 中键是否触发
+    click-trigger "both"              // left / right / both（上游默认左+右）
+    enable-middle-click-trigger false // 中键是否触发（上游默认不触发）
     // trigger-buttons "left" "middle" // 显式触发键列表，覆盖上面两行；支持
                                       // left/right/middle/back/forward/side/extra/task
                                       // 空节点 trigger-buttons 表示只留拖尾、不触发爆裂
 
-    hide-in-fullscreen true           // 全屏窗口上隐藏
+    hide-in-fullscreen false          // 全屏窗口上隐藏（上游默认不隐藏）
     show-on-desktop true              // 空工作区（桌面）上显示
     touch-mode false                  // 触摸屏模式
 
@@ -99,15 +98,10 @@ cursor-effect {
         opacity 1.0                   // 0 关闭拖尾但保留点击爆裂
         length 1.0
     }
-    glow {                            // 各元素的光晕（上游 Bloom 的解析近似）
-        gain 1.0                      // 0 关闭光晕，只留实体形状
-        radius 1.0
-        trail-gain 1.0
-    }
 }
 ```
 
-五个子块 `disk` / `rings` / `shards` / `trail` / `glow` 各最多出现一次，只写需要改的字段即可。
+四个子块 `disk` / `rings` / `shards` / `trail` 各最多出现一次，只写需要改的字段即可。`glow` 段已由整帧 Bloom 取代，仍接受旧配置但不再单独生效。
 把某个 `count` 或 `opacity` 设为 `0` 可以单独去掉那个元素。
 
 #### 开关快捷键

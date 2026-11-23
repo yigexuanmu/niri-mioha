@@ -424,7 +424,7 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn is_grid_overview_open(&self) -> bool {
-        self.grid_overview.as_ref().map_or(false, |g| g.open)
+        self.grid_overview.as_ref().is_some_and(|g| g.open)
     }
 
     pub fn grid_overview_progress(&self) -> Option<f64> {
@@ -436,7 +436,7 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn is_grid_overview_animation(&self) -> bool {
         self.grid_overview
             .as_ref()
-            .map_or(false, |g| g.is_animation())
+            .is_some_and(|g| g.is_animation())
     }
 
     pub fn toggle_grid_overview(&mut self) {
@@ -1306,7 +1306,7 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn are_grid_overview_animations_ongoing(&self) -> bool {
         self.grid_overview
             .as_ref()
-            .map_or(false, |g| g.are_animations_ongoing())
+            .is_some_and(|g| g.are_animations_ongoing())
     }
 
     fn grid_overview_items(&self) -> Vec<(GridItem<W>, GridSource)> {
@@ -1567,9 +1567,11 @@ impl<W: LayoutElement> Workspace<W> {
                     }
 
                     let is_grid_focused = idx == go.focus;
-                    let focused_window = is_grid_focused
-                        .then_some(())
-                        .and_then(|_| grid_focused_window_id.as_ref());
+                    let focused_window = if is_grid_focused {
+                        grid_focused_window_id.as_ref()
+                    } else {
+                        None
+                    };
 
                     self.scrolling.update_grid_item_render_elements(
                         item,
@@ -2344,9 +2346,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         // A placeholder column is not interactable.
-        if self.scrolling.active_window().is_none() {
-            return None;
-        }
+        self.scrolling.active_window()?;
 
         let column = self.scrolling.remove_active_column()?;
 
@@ -3602,7 +3602,7 @@ impl<W: LayoutElement> Workspace<W> {
                     .columns()
                     .nth(col_idx)
                     .and_then(|col| col.tiles().nth(active_idx))
-                    .map_or(false, |(tile, _)| tile.window().id() == window_id)
+                    .is_some_and(|(tile, _)| tile.window().id() == window_id)
             };
             let is_active_tab_item = |item: &GridItem<W>| match item {
                 GridItem::Tab {

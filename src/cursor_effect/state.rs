@@ -1,6 +1,14 @@
 //! 光标特效的运行时状态：把 niri 的指针事件翻译成 BA 模拟的输入。
+//!
+//! P6：模拟内核从「全局一份」改为「每输出一份」。上游每个显示器会话都有自己
+//! 的 overlay / viewport / 模拟实例（`main.cpp:1941` 逐会话推进），点击落在屏幕
+//! 交界处时特效会跨两块屏连续；原先全局一份 + 只在指针屏绘制，会让爆裂圆盘和
+//! 环在屏幕边缘被切掉一半，跨屏拖尾还会因为 `viewport.height` 突变而整体缩放
+//! （N16）。这里用 `Output::name()` 作为 key，各输出独立推进、独立回收。
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Instant;
 
 use super::ba::curve::{ClickParticleSettings, ShardParticleSettings};
@@ -9,20 +17,16 @@ use super::ba::{
     apply_visual_config, LayerVisibility, Point, SimulationRuntime, Snapshot, Viewport,
     VisualConfig,
 };
+use super::effect_target::EffectTarget;
 use super::render::TrailTarget;
 
-/// 拖尾的默认输入采样率（Hz），与 `niri-config` 的
-/// `CursorEffect::default().trail_refresh_rate` 一致。
-///
-/// 两处必须同值：实机永远走 `settings_from_config`（拿的是 40），而离线渲染
-/// 工具和单元测试走 `CursorEffectSettings::default()`。一旦两份漂移，测出来的
-/// 东西就不代表用户看到的东西了。
-pub const DEFAULT_TRAIL_REFRESH_RATE: u32 = 40;
+/// 默认输出 key（离线工具 / 单元测试 / 尚未拿到 Output 名字时使用）。
+pub const DEFAULT_OUTPUT_KEY: &str = "default";
+
+/// 拖尾的默认输入采样率（Hz）。P0 起与上游一致：0 = 每个指针事件都采样。
+pub const DEFAULT_TRAIL_REFRESH_RATE: u32 = 0;
 
 /// 鼠标键种类。
-///
-/// 刻意**不**直接用 smithay 的 `MouseButton`：这一层是纯逻辑，单元测试要能在
-/// 没有后端类型的情况下跑；输入层负责把 `MouseButton` 翻成这个枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TriggerButton {
     Left,
@@ -36,7 +40,6 @@ pub enum TriggerButton {
 }
 
 impl TriggerButton {
-    /// 在集合里的位序号。8 个键正好一个字节。
     const fn bit(self) -> u8 {
         match self {
             Self::Left => 1 << 0,
@@ -49,45 +52,27 @@ impl TriggerButton {
             Self::Task => 1 << 7,
         }
     }
-
-    pub const ALL: [TriggerButton; 8] = [
-        Self::Left,
-        Self::Right,
-        Self::Middle,
-        Self::Back,
-        Self::Forward,
-        Self::Side,
-        Self::Extra,
-        Self::Task,
-    ];
 }
 
 /// 哪些按键会触发点击爆裂（位集合）。
-///
-/// 上游 BASpark 的 `ClickTriggerType` 只有「左 / 右 / 两者」三档，中键靠一个
-/// 单独的 `enable-middle-click-trigger` 开关，侧键和后两个键根本不认。配置项
-/// `trigger-buttons` 把这三种写法合成一个显式列表，这里是它在运行时的形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClickTrigger {
     mask: u8,
 }
 
 impl ClickTrigger {
-    /// 一个键都不触发（`trigger-buttons` 写成空节点）。
     pub const fn empty() -> Self {
         Self { mask: 0 }
     }
 
     pub const fn single(button: TriggerButton) -> Self {
-        Self {
-            mask: button.bit(),
-        }
+        Self { mask: button.bit() }
     }
 
-    /// 上游默认：左键 + 中键（`click-trigger left` + `enable-middle-click-trigger`）。
+    /// 上游默认：左键 + 右键（`ClickTriggerType::Both`）。
     pub const fn legacy_default() -> Self {
         Self {
-            mask: TriggerButton::Left.bit() | TriggerButton::Middle.bit(),
+            mask: TriggerButton::Left.bit() | TriggerButton::Right.bit(),
         }
     }
 
@@ -112,66 +97,105 @@ impl ClickTrigger {
     }
 }
 
-/// 光标特效运行时状态。
+/// 单个输出的运行状态。
+struct Slot {
+    runtime: SimulationRuntime,
+    viewport: Viewport,
+    visible: Cell<bool>,
+    last_input_sample_at: Option<f64>,
+    trail_target: Rc<RefCell<TrailTarget>>,
+    effect_target: Rc<RefCell<EffectTarget>>,
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Self {
+            runtime: SimulationRuntime::new(DEFAULT_SEED),
+            viewport: Viewport::new(1920, 1080),
+            visible: Cell::new(true),
+            last_input_sample_at: None,
+            trail_target: Rc::new(RefCell::new(TrailTarget::default())),
+            effect_target: Rc::new(RefCell::new(EffectTarget::default())),
+        }
+    }
+}
+
+impl Slot {
+    fn accept_input_sample(&mut self, refresh_rate: u32, time: f64) -> bool {
+        if refresh_rate == 0 {
+            return true;
+        }
+        let interval = 1.0 / f64::from(refresh_rate);
+        match self.last_input_sample_at {
+            Some(last) if time - last < interval => false,
+            _ => {
+                self.last_input_sample_at = Some(time);
+                true
+            }
+        }
+    }
+}
+
+/// 光标特效运行时状态（每输出一份模拟）。
 pub struct CursorEffectState {
     /// 总开关（`toggle-cursor-effect` 动作切换）。
     pub enabled: bool,
-    runtime: SimulationRuntime,
+    runtimes: RefCell<HashMap<String, Slot>>,
     /// 模拟时间原点；所有时间戳都是相对它的秒数。
     epoch: Instant,
-    /// 鼠标所在输出的物理尺寸，事件与渲染共用同一份，保证坐标自洽。
-    viewport: Cell<Viewport>,
     visual: VisualConfig,
     click_particle: ClickParticleSettings,
     shard_particle: ShardParticleSettings,
     click_trigger: ClickTrigger,
-    /// 不按键也常显拖尾。
     pub persistent_trail: bool,
     pub hide_in_fullscreen: bool,
     pub show_on_desktop: bool,
     trail_length: f32,
     click_time_scale: f32,
     trail_time_scale: f32,
-    /// 拖尾的输入采样率（Hz）。0 = 每个指针事件都采。
     trail_refresh_rate: u32,
-    /// 上一次被接受的输入采样时刻（模拟时间，秒）。
-    last_input_sample_at: Option<f64>,
-    /// 是否让触摸输入驱动特效（`touch-mode`）。
     touch_mode: bool,
-    /// 拖尾的离屏合成目标（`GL_MAX` 并集，见 `render::TrailTarget`）。
-    ///
-    /// GPU 资源放在状态里而不是每次都新建：离屏纹理只增不减，一帧一次分配会
-    /// 稳定地每帧触发一次显存分配 / 释放。
-    trail_target: RefCell<TrailTarget>,
 }
 
 impl Default for CursorEffectState {
     fn default() -> Self {
         Self {
             enabled: true,
-            runtime: SimulationRuntime::new(DEFAULT_SEED),
+            runtimes: RefCell::new(HashMap::new()),
             epoch: Instant::now(),
-            viewport: Cell::new(Viewport::new(1920, 1080)),
             visual: VisualConfig::default(),
             click_particle: ClickParticleSettings::default(),
             shard_particle: ShardParticleSettings::default(),
             click_trigger: ClickTrigger::legacy_default(),
             persistent_trail: false,
-            hide_in_fullscreen: true,
+            hide_in_fullscreen: false,
             show_on_desktop: true,
             trail_length: 1.0,
             click_time_scale: 1.0,
             trail_time_scale: 1.0,
             trail_refresh_rate: DEFAULT_TRAIL_REFRESH_RATE,
-            last_input_sample_at: None,
             touch_mode: false,
-            trail_target: RefCell::new(TrailTarget::default()),
         }
     }
 }
 
 impl CursorEffectState {
-    /// 应用一份配置（热重载也会走这里）。
+    fn with_slot<R>(&self, key: &str, f: impl FnOnce(&mut Slot) -> R) -> R {
+        let mut runtimes = self.runtimes.borrow_mut();
+        let slot = runtimes.entry(key.to_owned()).or_default();
+        f(slot)
+    }
+
+    fn slot_ref(&self, key: &str) -> Option<std::cell::Ref<'_, HashMap<String, Slot>>> {
+        let runtimes = self.runtimes.borrow();
+        if runtimes.contains_key(key) {
+            Some(runtimes)
+        } else {
+            None
+        }
+    }
+
+    /// 应用一份配置（热重载也会走这里）；所有输出共享视觉参数。
     pub fn apply_settings(&mut self, settings: CursorEffectSettings) {
         self.enabled = settings.enabled;
         self.visual = settings.visual;
@@ -184,63 +208,97 @@ impl CursorEffectState {
         self.trail_length = settings.trail_length;
         self.click_time_scale = settings.click_time_scale;
         self.trail_time_scale = settings.trail_time_scale;
-        if self.trail_refresh_rate != settings.trail_refresh_rate {
-            // 换采样率等于换一整条相位，旧的采样时刻不能再用。
-            self.last_input_sample_at = None;
-        }
+        let rate_changed = self.trail_refresh_rate != settings.trail_refresh_rate;
         self.trail_refresh_rate = settings.trail_refresh_rate;
         self.touch_mode = settings.touch_mode;
 
         let now = self.time(Instant::now());
-        self.runtime
-            .set_click_particle_settings(self.click_particle);
-        self.runtime
-            .set_shard_particle_settings(self.shard_particle);
-        self.runtime.set_trail_length_multiplier(self.trail_length);
-        self.runtime
-            .set_click_time_scale(self.click_time_scale, now);
-        self.runtime
-            .set_trail_time_scale(self.trail_time_scale, now);
-        self.runtime
-            .update_unity_trail_time_scale(self.trail_time_scale);
-        // 常驻拖尾换到独立实例，配置变化要立刻同步过去。
-        self.runtime
-            .set_always_on_trail_enabled(self.persistent_trail, now);
+        for slot in self.runtimes.borrow_mut().values_mut() {
+            if rate_changed {
+                slot.last_input_sample_at = None;
+            }
+            slot.runtime
+                .set_click_particle_settings(self.click_particle);
+            slot.runtime
+                .set_shard_particle_settings(self.shard_particle);
+            slot.runtime.set_trail_length_multiplier(self.trail_length);
+            slot.runtime
+                .set_click_time_scale(self.click_time_scale, now);
+            slot.runtime
+                .set_trail_time_scale(self.trail_time_scale, now);
+            slot.runtime
+                .update_unity_trail_time_scale(self.trail_time_scale);
+            slot.runtime
+                .set_always_on_trail_enabled(self.persistent_trail, now);
+        }
     }
 
-    /// 更新鼠标所在输出尺寸（物理像素）。渲染与事件必须用同一份。
+    /// 更新某个输出的物理尺寸（渲染与事件必须用同一份）。
+    pub fn set_viewport_for(&self, key: &str, viewport: Viewport) {
+        self.with_slot(key, |slot| slot.viewport = viewport);
+    }
+
+    /// 兼容单输出调用点 / 测试。
     pub fn set_viewport(&self, viewport: Viewport) {
-        self.viewport.set(viewport);
+        self.set_viewport_for(DEFAULT_OUTPUT_KEY, viewport);
+    }
+
+    pub fn viewport_for(&self, key: &str) -> Viewport {
+        self.slot_ref(key)
+            .and_then(|runtimes| runtimes.get(key).map(|slot| slot.viewport))
+            .unwrap_or_else(|| Viewport::new(1920, 1080))
     }
 
     pub fn viewport(&self) -> Viewport {
-        self.viewport.get()
+        self.viewport_for(DEFAULT_OUTPUT_KEY)
     }
 
-    /// 触摸输入是否要驱动特效（供输入层判断）。
+    /// 由渲染路径告知某个输出本帧是否会真的绘制。
+    pub fn set_visible_for(&self, key: &str, visible: bool) {
+        self.with_slot(key, |slot| slot.visible.set(visible));
+    }
+
+    /// 兼容单输出调用点 / 测试：把当前所有输出的可见性一起设置。
+    pub fn set_visible(&self, visible: bool) {
+        for slot in self.runtimes.borrow().values() {
+            slot.visible.set(visible);
+        }
+    }
+
+    pub fn visible(&self) -> bool {
+        self.slot_ref(DEFAULT_OUTPUT_KEY)
+            .and_then(|runtimes| {
+                runtimes
+                    .get(DEFAULT_OUTPUT_KEY)
+                    .map(|slot| slot.visible.get())
+            })
+            .unwrap_or(true)
+    }
+
     pub fn touch_mode(&self) -> bool {
         self.enabled && self.touch_mode
     }
 
-    /// 当前视觉参数。渲染层要用到 `glow_*` / `ring_inner_ratio` / `tint` 这些
-    /// 只影响着色、不影响模拟的量，它们没有进 `Snapshot`（上游快照结构固定），
-    /// 所以由渲染层直接借用。
     pub fn visual(&self) -> &VisualConfig {
         &self.visual
     }
 
-    /// 拖尾的离屏合成目标（渲染层用）。
-    pub fn trail_target(&self) -> &RefCell<TrailTarget> {
-        &self.trail_target
+    pub fn trail_target_for(&self, key: &str) -> Rc<RefCell<TrailTarget>> {
+        self.with_slot(key, |slot| slot.trail_target.clone())
     }
 
-    /// 对齐内部时间原点（离线渲染工具 / 基准测试用）。
-    ///
-    /// `time(now)` 返回 `now - epoch` 的秒数。工具侧把自己的时钟锚点传进来，
-    /// `time(anchor + t)` 就**恰好**等于 `t`。不锚定的话，`epoch`（状态创建的
-    /// 真实时刻）与工具时钟之间夹着一段真实创建耗时，纳秒级的运行间抖动会让
-    /// 40Hz 输入采样门在 `0.025s` 的判定边界上随机翻转 —— 实测拖尾末端凭空
-    /// 差出 2~3 个采样点（约 60px），亮暗两态随机切换。
+    pub fn effect_target_for(&self, key: &str) -> Rc<RefCell<EffectTarget>> {
+        self.with_slot(key, |slot| slot.effect_target.clone())
+    }
+
+    pub fn trail_target(&self) -> Rc<RefCell<TrailTarget>> {
+        self.trail_target_for(DEFAULT_OUTPUT_KEY)
+    }
+
+    pub fn effect_target(&self) -> Rc<RefCell<EffectTarget>> {
+        self.effect_target_for(DEFAULT_OUTPUT_KEY)
+    }
+
     pub fn set_time_origin(&mut self, origin: Instant) {
         self.epoch = origin;
     }
@@ -249,8 +307,15 @@ impl CursorEffectState {
         now.saturating_duration_since(self.epoch).as_secs_f64()
     }
 
-    /// 指针按下：触发点击爆裂。
-    pub fn on_button_press(&mut self, pos: Point, now: Instant, button: TriggerButton) {
+    /// 指针按下：触发点击爆裂（广播到某个输出）。
+    pub fn on_button_press_for(
+        &mut self,
+        key: &str,
+        pos: Point,
+        viewport: Viewport,
+        now: Instant,
+        button: TriggerButton,
+    ) {
         if !self.enabled {
             return;
         }
@@ -258,69 +323,106 @@ impl CursorEffectState {
             return;
         }
         let time = self.time(now);
-        self.runtime.pointer_down(pos, self.viewport.get(), time);
-        // 按下等于重开一个采样相位：上游 `acquirePressedInstance` 在派发
-        // `pointerDown` 之后会把 `lastInputSampleAt_` 重置成按下时刻，这样按下
-        // 之后的第一帧移动永远会被接受（不管是鼠标还是刚落到屏上的手指）。
-        self.last_input_sample_at = None;
+        self.with_slot(key, |slot| {
+            slot.viewport = viewport;
+            slot.runtime.pointer_down(pos, viewport, time);
+            // 按下等于重开一个采样相位：按下之后的第一帧移动永远会被接受。
+            slot.last_input_sample_at = None;
+        });
     }
 
-    /// 指针抬起。
-    pub fn on_button_release(&mut self, now: Instant) {
-        if !self.enabled {
-            return;
-        }
-        self.runtime.pointer_up(self.time(now));
+    /// 兼容单输出调用点 / 测试。
+    pub fn on_button_press(&mut self, pos: Point, now: Instant, button: TriggerButton) {
+        self.on_button_press_for(DEFAULT_OUTPUT_KEY, pos, self.viewport(), now, button);
     }
 
-    /// 指针移动：按住时喂拖尾；常驻拖尾模式下自行起一个只带拖尾的实例。
-    pub fn on_move(&mut self, pos: Point, now: Instant) {
+    /// 指针抬起（广播到某个输出）。
+    pub fn on_button_release_for(&mut self, key: &str, now: Instant) {
         if !self.enabled {
             return;
         }
         let time = self.time(now);
-        if !self.accept_input_sample(time) {
+        self.with_slot(key, |slot| slot.runtime.pointer_up(time));
+    }
+
+    pub fn on_button_release(&mut self, now: Instant) {
+        self.on_button_release_for(DEFAULT_OUTPUT_KEY, now);
+    }
+
+    /// 指针取消（Alt+Tab、指针离开输出、触摸取消）：立即收尾（N11）。
+    pub fn on_pointer_cancel_for(&mut self, key: &str, now: Instant) {
+        if !self.enabled {
             return;
         }
-        let viewport = self.viewport.get();
-        // 按下时喂当前实例；没按下时（常驻拖尾）由运行时自己维护一个只带拖尾的
-        // 实例，上游 `SimulationRuntime::pointerMove` 同构。
-        self.runtime
-            .set_always_on_trail_enabled(self.persistent_trail, time);
-        self.runtime.pointer_move(pos, viewport, time);
+        let time = self.time(now);
+        self.with_slot(key, |slot| {
+            slot.runtime.pointer_cancel(time);
+            slot.last_input_sample_at = None;
+        });
     }
 
-    /// 输入采样门（对应上游 `SimulationRuntime::acceptInputSample`）。
-    ///
-    /// `trail-refresh-rate` 就是上游的 `inputSamplingRateHz`：> 0 时按固定频率
-    /// 丢弃指针事件，只有跨过一个采样间隔的那次移动才会喂给模拟。0 表示「每个
-    /// 事件都采」，也就是旧行为。
-    ///
-    /// 采样被丢弃时**整个** `pointer_move` 都不调用（上游也是直接 return）：
-    /// 拖尾点是按采样时刻追加的，只更新位置而不追加点会让新旧两点之间的线段
-    /// 长度与时间对不上，带宽和颜色的进度插值跟着歪。
-    fn accept_input_sample(&mut self, time: f64) -> bool {
-        if self.trail_refresh_rate == 0 {
-            return true;
+    pub fn on_pointer_cancel(&mut self, now: Instant) {
+        self.on_pointer_cancel_for(DEFAULT_OUTPUT_KEY, now);
+    }
+
+    /// 指针移动（广播到某个输出）。
+    pub fn on_move_for(&mut self, key: &str, pos: Point, viewport: Viewport, now: Instant) {
+        if !self.enabled {
+            return;
         }
-        let interval = 1.0 / f64::from(self.trail_refresh_rate);
-        match self.last_input_sample_at {
-            Some(last) if time - last < interval => false,
-            _ => {
-                self.last_input_sample_at = Some(time);
-                true
+        let time = self.time(now);
+        let refresh_rate = self.trail_refresh_rate;
+        let persistent = self.persistent_trail;
+        self.with_slot(key, |slot| {
+            slot.viewport = viewport;
+            if !slot.accept_input_sample(refresh_rate, time) {
+                return;
             }
-        }
+            slot.runtime.set_always_on_trail_enabled(persistent, time);
+            slot.runtime.pointer_move(pos, viewport, time);
+        });
     }
 
-    /// 每帧推进；返回是否还有可绘制内容（调用方据此决定是否持续出帧）。
-    pub fn advance(&mut self, now: Instant) -> bool {
+    pub fn on_move(&mut self, pos: Point, now: Instant) {
+        self.on_move_for(DEFAULT_OUTPUT_KEY, pos, self.viewport(), now);
+    }
+
+    /// 兼容单输出测试：采样门。
+    #[cfg(test)]
+    fn accept_input_sample(&mut self, time: f64) -> bool {
+        let refresh_rate = self.trail_refresh_rate;
+        self.with_slot(DEFAULT_OUTPUT_KEY, |slot| {
+            slot.accept_input_sample(refresh_rate, time)
+        })
+    }
+
+    /// 每帧推进**所有**输出；返回是否还有可绘制内容。
+    pub fn advance_all(&mut self, now: Instant) -> bool {
         if !self.enabled {
             return false;
         }
         let time = self.time(now);
-        self.runtime.advance(time);
-        self.runtime.rendering_required(time)
+        let mut alive = false;
+        for slot in self.runtimes.borrow_mut().values_mut() {
+            if !slot.visible.get() {
+                // 看不见就不需要继续模拟；顺手清掉，避免隐藏期间累积出一个
+                // 「永远活着」的实例让合成器永久空转（N21）。
+                if slot.runtime.active() {
+                    slot.runtime.discard_active_effects();
+                }
+                continue;
+            }
+            slot.runtime.advance(time);
+            if slot.runtime.rendering_required(time) {
+                alive = true;
+            }
+        }
+        alive
+    }
+
+    /// 兼容单输出调用点 / 测试。
+    pub fn advance(&mut self, now: Instant) -> bool {
+        self.advance_all(now)
     }
 
     /// 渲染完一帧后调用（对应上游 `onFrameRendered`，负责回收）。
@@ -329,32 +431,63 @@ impl CursorEffectState {
             return;
         }
         let time = self.time(now);
-        self.runtime.on_frame_rendered(time);
+        for slot in self.runtimes.borrow_mut().values_mut() {
+            slot.runtime.on_frame_rendered(time);
+            // N23：没有活动实例时释放离屏纹理，避免 4K 下几十 MB 常驻。
+            if !slot.runtime.active() {
+                slot.trail_target.borrow_mut().release();
+                slot.effect_target.borrow_mut().release();
+            }
+        }
     }
 
-    /// 取一帧快照并套用产品级视觉参数。
-    pub fn snapshot(&self, viewport: Viewport, now: Instant) -> Snapshot {
-        let mut snapshot = self.runtime.snapshot(viewport, self.time(now));
+    /// 取某个输出的一帧快照并套用产品级视觉参数。
+    pub fn snapshot_for(&self, key: &str, viewport: Viewport, now: Instant) -> Snapshot {
+        let time = self.time(now);
+        let mut snapshot = self.with_slot(key, |slot| {
+            slot.viewport = viewport;
+            slot.runtime.snapshot(viewport, time)
+        });
         apply_visual_config(&mut snapshot, &self.visual);
         snapshot
     }
 
+    pub fn snapshot(&self, viewport: Viewport, now: Instant) -> Snapshot {
+        self.snapshot_for(DEFAULT_OUTPUT_KEY, viewport, now)
+    }
+
     /// 关掉特效时清空全部粒子与拖尾。
     pub fn clear(&mut self) {
-        self.runtime.discard_active_effects();
+        for slot in self.runtimes.borrow_mut().values_mut() {
+            slot.runtime.discard_active_effects();
+        }
     }
 
     pub fn has_content(&self) -> bool {
-        self.runtime.active()
+        self.runtimes
+            .borrow()
+            .values()
+            .any(|slot| slot.runtime.active())
     }
 
-    /// 是否还需要继续出帧（对应上游「模拟仍激活」）。
+    /// 是否还需要继续出帧（任一可见输出仍有活动实例）。
+    pub fn has_work_any(&self) -> bool {
+        self.enabled
+            && self
+                .runtimes
+                .borrow()
+                .values()
+                .any(|slot| slot.visible.get() && slot.runtime.active())
+    }
+
     pub fn has_work(&self) -> bool {
-        self.enabled && self.runtime.active()
+        self.has_work_any()
     }
 
     pub fn set_layer_visibility(&mut self, visibility: LayerVisibility) {
-        self.runtime.set_layer_visibility(visibility);
+        for slot in self.runtimes.borrow_mut().values_mut() {
+            slot.runtime.set_layer_visibility(visibility);
+        }
     }
 }
 
@@ -372,13 +505,7 @@ pub struct CursorEffectSettings {
     pub trail_length: f32,
     pub click_time_scale: f32,
     pub trail_time_scale: f32,
-    /// 拖尾输入采样率（Hz）。0 = 每个指针事件都采。
     pub trail_refresh_rate: u32,
-    /// 触摸输入是否驱动特效（`touch-mode`）。
-    ///
-    /// 关掉时光标特效只跟鼠标/触摸板走 —— 触摸屏上按下手指不会有任何效果。
-    /// 打开后 `on_touch_down` / `on_touch_motion` / `on_touch_up` 也会喂事件，
-    /// 于是触摸屏能画出同样的拖尾和点击爆裂。
     pub touch_mode: bool,
 }
 
@@ -391,7 +518,7 @@ impl Default for CursorEffectSettings {
             shard_particle: ShardParticleSettings::default(),
             click_trigger: ClickTrigger::legacy_default(),
             persistent_trail: false,
-            hide_in_fullscreen: true,
+            hide_in_fullscreen: false,
             show_on_desktop: true,
             trail_length: 1.0,
             click_time_scale: 1.0,
@@ -423,14 +550,11 @@ mod tests {
 
     #[test]
     fn trigger_filter_respects_config() {
-        // 上游默认：左键 + 中键。
         let legacy = ClickTrigger::legacy_default();
         assert!(legacy.accepts(TriggerButton::Left));
-        assert!(legacy.accepts(TriggerButton::Middle));
-        assert!(!legacy.accepts(TriggerButton::Right));
-        assert!(!legacy.accepts(TriggerButton::Back));
+        assert!(legacy.accepts(TriggerButton::Right));
+        assert!(!legacy.accepts(TriggerButton::Middle));
 
-        // 显式列表：只认写出来的那几个键。
         let custom = ClickTrigger::from_buttons([
             TriggerButton::Right,
             TriggerButton::Back,
@@ -442,12 +566,10 @@ mod tests {
         assert!(!custom.accepts(TriggerButton::Left));
         assert!(!custom.accepts(TriggerButton::Middle));
 
-        // 空列表 = 一个键都不触发。
         assert!(ClickTrigger::empty().is_empty());
         assert!(!ClickTrigger::empty().accepts(TriggerButton::Left));
     }
 
-    /// 配置里写了 `trigger-buttons` 之后，按下列表外的键不能起爆。
     #[test]
     fn non_trigger_button_does_not_burst() {
         let mut state = CursorEffectState::default();
@@ -463,12 +585,81 @@ mod tests {
         assert!(state.has_work(), "右键在列表里，应该起爆");
     }
 
-    /// 输入采样门：40Hz 下 100ms 内只放行约 4 个事件；按下重置相位，所以
-    /// 按下后的第一次移动永远被接受（上游 `firstAdvancePending` 的豁免）。
+    #[test]
+    fn per_output_instances_are_independent() {
+        let mut state = CursorEffectState::default();
+        let start = Instant::now();
+        state.epoch = start;
+        // 虚拟双屏：同一世界坐标 (1920, 540) 落在左屏右边缘 / 右屏左边缘。
+        state.on_button_press_for(
+            "eDP-1",
+            Point::new(1920.0, 540.0),
+            Viewport::new(1920, 1080),
+            start,
+            TriggerButton::Left,
+        );
+        state.on_button_press_for(
+            "DP-1",
+            Point::new(0.0, 540.0),
+            Viewport::new(2560, 1440),
+            start,
+            TriggerButton::Left,
+        );
+        state.advance_all(start + std::time::Duration::from_millis(16));
+        let left = state.snapshot_for(
+            "eDP-1",
+            Viewport::new(1920, 1080),
+            start + std::time::Duration::from_millis(16),
+        );
+        let right = state.snapshot_for(
+            "DP-1",
+            Viewport::new(2560, 1440),
+            start + std::time::Duration::from_millis(16),
+        );
+        assert!(!left.sprites.is_empty());
+        assert!(!right.sprites.is_empty());
+        // 各自视口的 ref_scale 不同（1440p = 1.333），不是同一份全局模拟。
+        assert!((left.ref_scale - 1.0).abs() < 1e-4);
+        assert!((right.ref_scale - 1440.0 / 1080.0).abs() < 1e-4);
+        assert!(right.ref_scale > left.ref_scale);
+        // 交界处连续：左屏盘心在 1920（右边缘），右屏盘心在 0（左边缘）。
+        let center = |snapshot: &Snapshot| {
+            snapshot
+                .sprites
+                .iter()
+                .find(|sprite| sprite.kind == crate::cursor_effect::ba::SpriteKind::CenterDisk)
+                .expect("CenterDisk")
+                .center
+        };
+        assert!((center(&left).x - 1920.0).abs() < 2.0);
+        assert!(center(&right).x.abs() < 2.0);
+    }
+
+    #[test]
+    fn has_work_respects_visibility() {
+        let mut state = CursorEffectState::default();
+        state.set_viewport(Viewport::new(1920, 1080));
+        let start = Instant::now();
+        state.epoch = start;
+        state.on_button_press(Point::new(100.0, 100.0), start, TriggerButton::Left);
+        state.advance(start + std::time::Duration::from_millis(16));
+        assert!(state.has_work(), "可见时点击应保持出帧");
+
+        state.set_visible(false);
+        assert!(!state.has_work(), "不可见时不该保持出帧");
+        assert!(!state.advance(start + std::time::Duration::from_millis(32)));
+        assert!(!state.has_content(), "不可见时应就地清空，避免永久空转");
+
+        state.set_visible(true);
+        assert!(!state.has_work(), "清空后没有实例，不该继续出帧");
+    }
+
     #[test]
     fn input_sampling_gate_follows_rate() {
-        let mut state = CursorEffectState::default();
-        state.trail_refresh_rate = 40;
+        let mut state = CursorEffectState {
+            trail_refresh_rate: 40,
+            ..Default::default()
+        };
         let start = Instant::now();
         state.epoch = start;
         let at = |ms: u64| start + std::time::Duration::from_millis(ms);
@@ -480,10 +671,8 @@ mod tests {
                 accepted += 1;
             }
         }
-        // 0、~28、~52、~80 → 4 次。
         assert!((3..=5).contains(&accepted), "accepted={accepted}");
 
-        // 0Hz = 关闭门限，每个事件都采。
         state.trail_refresh_rate = 0;
         assert!(state.accept_input_sample(0.101));
         assert!(state.accept_input_sample(0.102));

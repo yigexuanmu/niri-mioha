@@ -87,6 +87,12 @@ fn ce_dump_enabled() -> bool {
     *CACHE.get_or_init(|| std::env::var_os("CE_DUMP").is_some())
 }
 
+/// 语义化调试开关 `CE_NOJOINT=1`：关闭拐点外弧补片，用于对比补片前后的缺口。
+fn ce_joint_enabled() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| std::env::var_os("CE_NOJOINT").is_none())
+}
+
 /// 精灵/拖尾段的四边形额外留白（物理像素），避免柔边被矩形裁掉。
 const QUAD_PADDING: f64 = 1.0;
 
@@ -467,7 +473,7 @@ pub fn build_commands(snapshot: &ba::Snapshot, visual: &ba::VisualConfig) -> Vec
     let mut sprites: Vec<&ba::Sprite> = snapshot.sprites.iter().collect();
     sprites.sort_by_key(|sprite| sprite.render_queue);
     for sprite in sprites {
-        if !(sprite.size > 0.0) || !sprite.size.is_finite() {
+        if sprite.size <= 0.0 || !sprite.size.is_finite() {
             continue;
         }
         let base = Base {
@@ -513,13 +519,9 @@ pub fn build_commands(snapshot: &ba::Snapshot, visual: &ba::VisualConfig) -> Vec
                 &base,
             ),
         };
-        // 本体 + 辉光两条命令，共用同一个四边形。顺序在函数末尾统一排序。
+        // P2 之后辉光由整帧 Bloom 金字塔产生，不再为每个图元生成解析雾命令。
         out.push(DrawCommand {
             glow_pass: false,
-            ..command
-        });
-        out.push(DrawCommand {
-            glow_pass: true,
             ..command
         });
     }
@@ -625,8 +627,8 @@ fn resample_curve(points: &[ba::TrailPoint]) -> Vec<ba::TrailPoint> {
         let seg = ((p2.position.x - p1.position.x).powi(2)
             + (p2.position.y - p1.position.y).powi(2))
         .sqrt() as f64;
-        let steps = ((seg / CURVE_DRAW_STEP_PX).ceil() as usize)
-            .clamp(1, CURVE_DRAW_MAX_SUBDIVISIONS);
+        let steps =
+            ((seg / CURVE_DRAW_STEP_PX).ceil() as usize).clamp(1, CURVE_DRAW_MAX_SUBDIVISIONS);
 
         // 末段的前一个点由上一段补过，这里只补 (t, 1] 以免重复。
         let first = if index == 0 { 0 } else { 1 };
@@ -648,8 +650,7 @@ fn resample_curve(points: &[ba::TrailPoint]) -> Vec<ba::TrailPoint> {
             let y = if y.is_finite() { y } else { p1.position.y };
             out.push(ba::TrailPoint {
                 position: ba::Point::new(x, y),
-                normalized_age: p1.normalized_age
-                    + (p2.normalized_age - p1.normalized_age) * t,
+                normalized_age: p1.normalized_age + (p2.normalized_age - p1.normalized_age) * t,
             });
         }
     }
@@ -657,7 +658,8 @@ fn resample_curve(points: &[ba::TrailPoint]) -> Vec<ba::TrailPoint> {
 }
 
 /// 一条并不存在的连线。
-fn build_trail(snapshot: &ba::Snapshot, visual: &ba::VisualConfig, out: &mut Vec<DrawCommand>) {    for (points, width) in snapshot.strokes() {
+fn build_trail(snapshot: &ba::Snapshot, visual: &ba::VisualConfig, out: &mut Vec<DrawCommand>) {
+    for (points, width) in snapshot.strokes() {
         build_trail_stroke(points, width, snapshot, visual, out);
     }
 }
@@ -669,7 +671,7 @@ fn build_trail_stroke(
     visual: &ba::VisualConfig,
     out: &mut Vec<DrawCommand>,
 ) {
-    if points.len() < 2 || !(width > 0.0) || !width.is_finite() {
+    if points.len() < 2 || width <= 0.0 || !width.is_finite() {
         return;
     }
     // `apply-curve-draw`：先把采样点补成曲线，再走同一套铺段逻辑。
@@ -704,7 +706,7 @@ fn build_trail_stroke(
         distances.push(last + (dx * dx + dy * dy).sqrt());
     }
     let total = *distances.last().unwrap();
-    if !(total > 1e-3) || !total.is_finite() {
+    if total <= 1e-3 || !total.is_finite() {
         return;
     }
 
@@ -722,6 +724,7 @@ fn build_trail_stroke(
     let last_point = points.len() - 1;
 
     let half_width = width * 0.5;
+    let mut previous_run: Option<(usize, usize)> = None;
     for &(start, end) in runs.iter() {
         let from = points[start].position;
         let to = points[end].position;
@@ -821,6 +824,73 @@ fn build_trail_stroke(
             glow_radius: visual.glow_radius,
             ring_inner: visual.ring_inner_ratio,
         });
+
+        // P2：拐点外弧补片。
+        //
+        // 逐段四边形在急转弯处会让外侧留下一个三角缺口（两段各占一半带宽，
+        // 角平分线之外没人画）。上游 `makeUnityTrailMesh` 是一整条 ribbon，
+        // 拐角生成 `outerArc` 把外侧补满。这里等价地在共享拐点画一个半径 =
+        // 半宽的圆盘：`u_origin == u_seg_end` 时着色器的距离场退化成圆，
+        // 正好补住外侧缺口；它和相邻段一起进 `GL_MAX`，重叠不会叠亮。
+        if ce_joint_enabled() {
+            if let Some((previous_start, previous_end)) = previous_run {
+                if previous_end == start && start > previous_start {
+                    let joint = points[start].position;
+                    let previous = points[previous_start].position;
+                    let next = points[end].position;
+                    let (ax, ay) = (joint.x - previous.x, joint.y - previous.y);
+                    let (bx, by) = (next.x - joint.x, next.y - joint.y);
+                    let la = (ax * ax + ay * ay).sqrt();
+                    let lb = (bx * bx + by * by).sqrt();
+                    if la > 1e-3 && lb > 1e-3 {
+                        let cosine = (ax * bx + ay * by) / (la * lb);
+                        if cosine < 0.999 {
+                            let progress = distances[start] / total;
+                            let color = tinted(
+                                ba::trail::evaluate_unity_trail_color(progress),
+                                visual.tint,
+                            );
+                            let coverage = ba::trail::trail_longitudinal_coverage(progress);
+                            let half = half_width as f64 + QUAD_PADDING + 1.0;
+                            let side = half * 2.0;
+                            let center = [side as f32 * 0.5, side as f32 * 0.5];
+                            let quad = Rectangle::new(
+                                Point::from((joint.x as f64 - half, joint.y as f64 - half)),
+                                Size::from((side, side)),
+                            );
+                            out.push(DrawCommand {
+                                quad,
+                                material: Material::Trail,
+                                color,
+                                color_b: color,
+                                color_a: snapshot.trail_opacity,
+                                gop: snapshot.global_opacity,
+                                intensity: TRAIL_ARTISTIC_INTENSITY,
+                                threshold: 0.0,
+                                center,
+                                size: width,
+                                rot: 0.0,
+                                uv_off: [0.0, 1.0],
+                                cov: [coverage, coverage],
+                                progress: [1.0 - progress, 0.0],
+                                axis: [tangent.0, tangent.1, normal.0, normal.1],
+                                origin: center,
+                                seg_end: center,
+                                extent: [2.0 * joint_px as f32 + 1.0, width],
+                                cap: [0.0, 0.0],
+                                ref_scale,
+                                glow_gain: visual.glow_gain,
+                                trail_glow_gain: visual.glow_trail_gain,
+                                glow_pass: false,
+                                glow_radius: visual.glow_radius,
+                                ring_inner: visual.ring_inner_ratio,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        previous_run = Some((start, end));
     }
 }
 
@@ -905,6 +975,24 @@ impl CursorEffectElement {
         self.material
     }
 
+    /// 把一个已经合成好的纹理包装成可贴回输出的元素（P1 的 FP16 离屏目标用）。
+    pub fn from_composite(
+        texture: GlesTexture,
+        context_id: ContextId<GlesTexture>,
+        geo: Rectangle<i32, Physical>,
+        material: Option<Material>,
+    ) -> Self {
+        Self {
+            inner: CursorEffectInner::Texture(TrailComposite {
+                id: Id::new(),
+                texture,
+                context_id,
+                geo,
+            }),
+            material,
+        }
+    }
+
     /// 组装一个轴对齐四边形并绑定 uniform / 纹理。`scale` 用来把物理像素换算回
     /// 逻辑坐标（smithay 的元素尺寸是逻辑像素）。
     fn build(command: &DrawCommand, scale: f32, texture: &GlesTexture) -> Self {
@@ -916,11 +1004,7 @@ impl CursorEffectElement {
 }
 
 /// 构造「一次 draw 画一个四边形」的着色器元素。
-fn shader_element(
-    command: &DrawCommand,
-    scale: f32,
-    texture: &GlesTexture,
-) -> ShaderRenderElement {
+fn shader_element(command: &DrawCommand, scale: f32, texture: &GlesTexture) -> ShaderRenderElement {
     {
         let inverse = 1.0 / scale.max(f32::EPSILON) as f64;
         let loc = Point::<f64, Logical>::from((
@@ -959,7 +1043,10 @@ fn shader_element(
             Uniform::new("u_seg_end", command.seg_end),
             Uniform::new("u_extent", command.extent),
             Uniform::new("u_cap", command.cap),
-            Uniform::new("u_bloom", BLOOM_GAIN * command.glow_gain * command.trail_glow_gain),
+            Uniform::new(
+                "u_bloom",
+                BLOOM_GAIN * command.glow_gain * command.trail_glow_gain,
+            ),
             Uniform::new("u_glow_radius", command.glow_radius),
             // 0 = 本体（预乘 over），1 = 辉光（`alpha = 0`，等效 `One/One` 加法）。
             Uniform::new("u_pass", if command.glow_pass { 1.0f32 } else { 0.0 }),
@@ -1089,6 +1176,15 @@ struct CachedTarget {
 }
 
 impl TrailTarget {
+    /// 释放缓存的离屏纹理。
+    ///
+    /// 4K 屏上一次对角快速拖动，包围盒可以接近全屏 —— 一张 3840×2160
+    /// `Abgr8888` 约 33 MB，旧实现只增不减地常驻到进程结束（N23）。特效完全
+    /// 静止后释放，下一次拖动再按需创建。
+    pub fn release(&mut self) {
+        self.cached = None;
+    }
+
     /// 把一组拖尾段合成为一张纹理元素。
     ///
     /// `bounds` 是这些段的并集包围盒（输出物理像素），`elements` 必须是**相对
@@ -1116,12 +1212,17 @@ impl TrailTarget {
         };
         if recreate {
             let buffer_size = bounds.size.to_logical(1).to_buffer(1, Transform::Normal);
-            let texture = match renderer.create_buffer(Fourcc::Abgr8888, buffer_size) {
+            // P2：拖尾层必须是 FP16，否则 23.97 的 HDR 强度在写入时被截到
+            // 1.0，Bloom 的种子能量凭空消失（N7）。
+            let texture = match renderer.create_buffer(Fourcc::Abgr16161616f, buffer_size) {
                 Ok(texture) => texture,
-                Err(err) => {
-                    tracing::warn!("cursor-effect: creating trail target failed: {err}");
-                    return None;
-                }
+                Err(_) => match renderer.create_buffer(Fourcc::Abgr8888, buffer_size) {
+                    Ok(texture) => texture,
+                    Err(err) => {
+                        tracing::warn!("cursor-effect: creating trail target failed: {err}");
+                        return None;
+                    }
+                },
             };
             self.cached = Some(CachedTarget {
                 texture,
@@ -1208,15 +1309,15 @@ fn draw_into_target(
             .ok();
         eprintln!("  offscreen blend equation = 0x{:x}", eq[0]);
     }
-    let texture_size = texture.size().to_logical(1, Transform::Normal).to_physical(1);
+    let texture_size = texture
+        .size()
+        .to_logical(1, Transform::Normal)
+        .to_physical(1);
     let scale = Scale::from(scale.max(f32::EPSILON) as f64);
     let mut target = renderer.bind(texture)?;
     {
         let mut frame = renderer.render(&mut target, texture_size, Transform::Normal)?;
-        frame.clear(
-            Color32F::TRANSPARENT,
-            &[Rectangle::from_size(texture_size)],
-        )?;
+        frame.clear(Color32F::TRANSPARENT, &[Rectangle::from_size(texture_size)])?;
         for element in elements {
             let dst = element.geometry(scale);
             if dst.size.w <= 0 || dst.size.h <= 0 {
@@ -1265,10 +1366,7 @@ impl Element for TrailComposite {
         Transform::Normal
     }
     fn src(&self) -> Rectangle<f64, Buffer> {
-        Rectangle::from_size(Size::from((
-            self.geo.size.w as f64,
-            self.geo.size.h as f64,
-        )))
+        Rectangle::from_size(Size::from((self.geo.size.w as f64, self.geo.size.h as f64)))
     }
     fn damage_since(
         &self,
@@ -1368,6 +1466,25 @@ pub fn collect_render_elements(
     now: Instant,
     scale: f32,
 ) -> Vec<CursorEffectElement> {
+    collect_render_elements_for(
+        renderer,
+        state,
+        crate::cursor_effect::state::DEFAULT_OUTPUT_KEY,
+        state.viewport(),
+        now,
+        scale,
+    )
+}
+
+/// 某个输出上的收集入口（P6：每屏各自一份模拟与离屏目标）。
+pub fn collect_render_elements_for(
+    renderer: &mut impl NiriRenderer,
+    state: &CursorEffectState,
+    output_key: &str,
+    viewport: crate::cursor_effect::ba::Viewport,
+    now: Instant,
+    scale: f32,
+) -> Vec<CursorEffectElement> {
     if !state.enabled {
         tracing::debug!("cursor-effect: disabled");
         return Vec::new();
@@ -1377,37 +1494,59 @@ pub fn collect_render_elements(
         return Vec::new();
     };
 
-    let snapshot = state.snapshot(state.viewport(), now);
+    let snapshot = state.snapshot_for(output_key, viewport, now);
     if !snapshot.has_drawable_content() {
         tracing::debug!(
             "cursor-effect: snapshot empty (sprites={} strokes={} viewport={:?})",
             snapshot.sprites.len(),
             snapshot.trail_strokes.len(),
-            state.viewport()
+            viewport
         );
         return Vec::new();
     }
 
-    let commands = build_commands(&snapshot, state.visual());
+    let mut commands = build_commands(&snapshot, state.visual());
     tracing::debug!(
         "cursor-effect: {} commands (sprites={} strokes={} ref_scale={:.3} viewport={:?})",
         commands.len(),
         snapshot.sprites.len(),
         snapshot.trail_strokes.len(),
         snapshot.ref_scale,
-        state.viewport()
+        viewport
     );
 
-    // `CE_CMDDBG=1` 时把每帧的 DrawCommand 参数打到 stderr，用来核对「图元在屏幕上
-    // 到底多大、辉光半径倍率是多少」——标定辉光指数时离不开这两个数（`ring_out`
-    // 是像素口径，没有它就只能靠猜）。环境变量只在首次调用时读一次，热路径上不再
-    // 有 `getenv`。
+    // 调试开关必须在**命令层**过滤：P1 之后整帧只剩一个合成元素，元素层过滤
+    // 只能看到 material=None，没法再按材质/段拆开。
+    let selected_material = std::env::var("CE_ONLY")
+        .ok()
+        .and_then(|only| match only.as_str() {
+            "disk" => Some(Material::Disk),
+            "ring" => Some(Material::Ring),
+            "tri" | "triangle" => Some(Material::Triangle),
+            "trail" => Some(Material::Trail),
+            _ => None,
+        });
+    if let Some(material) = selected_material {
+        commands.retain(|command| command.material == material);
+    }
+    let only_segment = ce_only_segment();
+    if only_segment.is_some() {
+        commands.retain(|command| command.material == Material::Trail);
+    }
+    if let Ok(n) = std::env::var("CE_FIRST") {
+        let n: usize = n.parse().unwrap_or(usize::MAX);
+        commands.truncate(n);
+    }
+    if commands.is_empty() {
+        tracing::debug!("cursor-effect: commands filtered out");
+        return Vec::new();
+    }
+
     static CMDDBG: OnceLock<bool> = OnceLock::new();
     if *CMDDBG.get_or_init(|| std::env::var_os("CE_CMDDBG").is_some()) {
         eprintln!(
             "CMDBG ref_scale={:.4} viewport={:?}",
-            snapshot.ref_scale,
-            state.viewport()
+            snapshot.ref_scale, viewport
         );
         for c in &commands {
             eprintln!(
@@ -1428,11 +1567,13 @@ pub fn collect_render_elements(
         }
     }
 
-    // 拖尾先画（它在 `build_commands` 里也排在最前）：整条笔画合成成**一个**
-    // 离屏元素，后面的点击图元再叠上去。
-    let mut out = Vec::with_capacity(commands.len());
-    if let Some(element) = build_trail_element(renderer, state, &commands, scale) {
-        out.push(element);
+    // 按绘制顺序构建元素：拖尾先画（它在 `build_commands` 里也排在最前），
+    // 整条笔画合成成**一个**离屏元素，后面的点击图元再叠上去。
+    let mut elements: Vec<CursorEffectElement> = Vec::with_capacity(commands.len());
+    if let Some(element) =
+        build_trail_element(renderer, state, output_key, viewport, &commands, scale)
+    {
+        elements.push(element);
     }
     for command in &commands {
         if command.material == Material::Trail {
@@ -1446,29 +1587,87 @@ pub fn collect_render_elements(
             command.quad.size.w,
             command.quad.size.h
         );
-        out.push(CursorEffectElement::build(
+        elements.push(CursorEffectElement::build(
             command,
             scale,
             textures.get(command.material),
         ));
     }
+    if elements.is_empty() {
+        return Vec::new();
+    }
 
-    // 绘制顺序 → niri 的 push 顺序（从前到后）。见函数文档：调用方在落笔前会
-    // 反向迭代，这里不翻转的话整条特效会被上下颠倒。
-    out.reverse();
-    out
+    // 统一离屏目标的包围盒：元素几何的并集，再裁到视口。
+    let scale_rect = Scale::from((scale as f64).max(f64::EPSILON));
+    let mut union: Option<Rectangle<i32, Physical>> = None;
+    for element in &elements {
+        let geo = element.geometry(scale_rect);
+        if geo.size.w <= 0 || geo.size.h <= 0 {
+            continue;
+        }
+        union = Some(match union {
+            None => geo,
+            Some(current) => {
+                let min_x = current.loc.x.min(geo.loc.x);
+                let min_y = current.loc.y.min(geo.loc.y);
+                let max_x = (current.loc.x + current.size.w).max(geo.loc.x + geo.size.w);
+                let max_y = (current.loc.y + current.size.h).max(geo.loc.y + geo.size.h);
+                Rectangle::new(
+                    Point::from((min_x, min_y)),
+                    Size::from((max_x - min_x, max_y - min_y)),
+                )
+            }
+        });
+    }
+    let Some(union) = union else {
+        return Vec::new();
+    };
+    let viewport = state.viewport();
+    let viewport_rect = Rectangle::new(
+        Point::from((0, 0)),
+        Size::from((viewport.width as i32, viewport.height as i32)),
+    );
+    let Some(bounds) = union.intersection(viewport_rect) else {
+        return Vec::new();
+    };
+    if bounds.size.w <= 0 || bounds.size.h <= 0 {
+        return Vec::new();
+    }
+
+    // `CE_DIRECT=1` 保留 P1 之前的逐元素直接绘制路径，用于像素级验收
+    // （同一二进制内对比「FP16 合成」与「直接画 8-bit」）。
+    if std::env::var_os("CE_DIRECT").is_some() {
+        elements.reverse();
+        return elements;
+    }
+
+    // P1：整帧先合成进 FP16 离屏目标，再整体贴回。P2/P3 会在这里接
+    // direct/seed/bloom/transport；当前阶段不做任何颜色变换。
+    let viewport_size = Size::from((viewport.width as i32, viewport.height as i32));
+    let composite = state.effect_target_for(output_key).borrow_mut().composite(
+        renderer.as_gles_renderer(),
+        scale,
+        bounds,
+        viewport_size,
+        &elements,
+        selected_material,
+    );
+    match composite {
+        Some(element) => vec![element],
+        None => Vec::new(),
+    }
 }
 
 /// 把本帧所有拖尾段合成成一个离屏元素。
 fn build_trail_element(
     renderer: &mut impl NiriRenderer,
     state: &CursorEffectState,
+    output_key: &str,
+    viewport: crate::cursor_effect::ba::Viewport,
     commands: &[DrawCommand],
     scale: f32,
 ) -> Option<CursorEffectElement> {
-    let Some(textures) = Shaders::get(renderer).cursor_effect_textures.clone() else {
-        return None;
-    };
+    let textures = Shaders::get(renderer).cursor_effect_textures.clone()?;
 
     // `CE_SEG=n`：只合成第 n 段。离线诊断用 —— 把每段单独渲染出来，逐像素
     // 取最大值应当等于整条笔画的渲染结果，这就是「`GL_MAX` 等价于并集」的直接
@@ -1525,7 +1724,6 @@ fn build_trail_element(
     }
 
     // 裁到视口：输出外的部分本来也看不见，不裁会让整条笔画都去申请纹理。
-    let viewport = state.viewport();
     let viewport_rect = Rectangle::new(
         Point::from((0, 0)),
         Size::from((viewport.width as i32, viewport.height as i32)),
@@ -1552,10 +1750,12 @@ fn build_trail_element(
         })
         .collect();
 
-    state
-        .trail_target()
-        .borrow_mut()
-        .composite(renderer.as_gles_renderer(), scale, bounds, &elements)
+    state.trail_target_for(output_key).borrow_mut().composite(
+        renderer.as_gles_renderer(),
+        scale,
+        bounds,
+        &elements,
+    )
 }
 
 #[cfg(test)]
@@ -1584,9 +1784,18 @@ mod tests {
         use ba::TrailPoint;
         // 一段 300px 的直路被 40Hz 采样成 3 个点（间隔 150px）。
         let pts = vec![
-            TrailPoint { position: ba::Point::new(0.0, 0.0), normalized_age: 0.0 },
-            TrailPoint { position: ba::Point::new(150.0, 10.0), normalized_age: 0.5 },
-            TrailPoint { position: ba::Point::new(300.0, 0.0), normalized_age: 1.0 },
+            TrailPoint {
+                position: ba::Point::new(0.0, 0.0),
+                normalized_age: 0.0,
+            },
+            TrailPoint {
+                position: ba::Point::new(150.0, 10.0),
+                normalized_age: 0.5,
+            },
+            TrailPoint {
+                position: ba::Point::new(300.0, 0.0),
+                normalized_age: 1.0,
+            },
         ];
         let refined = resample_curve(&pts);
         // 8px 步长 ⇒ 每段补 19 个点左右，总量远多于原样。
@@ -1611,52 +1820,21 @@ mod tests {
         let snapshot = click_snapshot();
         let commands = build_commands(&snapshot, &ba::VisualConfig::default());
         assert!(commands.len() >= 2);
-        // 雾全部铺在最底。
-        assert!(
-            commands[0].glow_pass,
-            "首条命令必须是辉光遍（雾铺底），实际是 {:?}",
-            commands[0].material
-        );
-        // 本体（`glow_pass == false`）之间的顺序才是层序；辉光遍统一在开头重排。
+        // P2 只保留本体命令；Bloom 由整帧后处理产生。
+        assert!(commands.iter().all(|c| !c.glow_pass));
         let body = |material: Material| {
             commands
                 .iter()
-                .position(|c| c.material == material && !c.glow_pass)
+                .position(|c| c.material == material)
                 .unwrap_or_else(|| panic!("{material:?} 本体"))
         };
         // 上游提交顺序：Cross2 盘 → 同队列 4499 的 dissolve ring → Tri2(4550)。
-        // 环必须压在盘上面，否则环生长到盘内那段时间（0~200ms）会被盘整块盖掉，
-        // 点击瞬间就看不到白色光环。
-        assert!(body(Material::Disk) < body(Material::Ring), "圆盘先于圆环绘制");
-        // 三角形（队列 4550）永远在圆盘/圆环（4499）之后，也就是最上层。
+        assert!(
+            body(Material::Disk) < body(Material::Ring),
+            "圆盘先于圆环绘制"
+        );
         if commands.iter().any(|c| c.material == Material::Triangle) {
             assert!(body(Material::Triangle) > body(Material::Ring));
-        }
-        // 环的雾夹在盘本体与环本体之间；碎片的雾夹在环本体与碎片本体之间。
-        let first_body = commands
-            .iter()
-            .position(|c| !c.glow_pass)
-            .expect("至少有一个本体");
-        for (idx, cmd) in commands.iter().enumerate() {
-            if cmd.glow_pass {
-                match cmd.material {
-                    Material::Ring => assert!(
-                        idx > body(Material::Disk) && idx < body(Material::Ring),
-                        "环的雾必须夹在盘本体与环本体之间，否则盘面那圈内光会丢"
-                    ),
-                    // 碎片从点击点向外飞，雾朝圆心那半压在盘/环上；垫到它们下面
-                    // 就会被整片扣掉，只剩朝外那圈。
-                    Material::Triangle => assert!(
-                        idx > body(Material::Ring) && idx < body(Material::Triangle),
-                        "碎片的雾必须夹在环本体与碎片本体之间，否则朝圆心那半圈会丢"
-                    ),
-                    _ => assert!(
-                        idx < first_body,
-                        "{:?} 的辉光遍必须在本体之前，否则会糊在本体表面（漏光）",
-                        cmd.material
-                    ),
-                }
-            }
         }
     }
 

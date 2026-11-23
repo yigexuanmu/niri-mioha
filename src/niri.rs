@@ -2137,7 +2137,8 @@ impl State {
         // 重新应用光标特效配置；不动 `enabled`，它归运行时开关
         // （ToggleCursorEffect action）管，配置值只是初始状态。
         let cursor_effect_cfg = self.niri.config.borrow().cursor_effect.clone();
-        self.niri.apply_cursor_effect_config(&cursor_effect_cfg);
+        self.niri
+            .apply_cursor_effect_config_reloading(&cursor_effect_cfg);
 
         // Can't really update xdg-decoration settings since we have to hide the globals for CSD
         // due to the SDL2 bug... I don't imagine clients are prepared for the xdg-decoration
@@ -4995,24 +4996,23 @@ impl Niri {
             1.0
         };
 
-        if self.pointer_scale_animation.is_none()
-            || (self.pointer_scale_animation.as_ref().unwrap().to() - target_scale).abs() > 0.01
+        if (self.pointer_scale_animation.is_none()
+            || (self.pointer_scale_animation.as_ref().unwrap().to() - target_scale).abs() > 0.01)
+            && (target_scale != 1.0 || current_scale != 1.0)
         {
-            if target_scale != 1.0 || current_scale != 1.0 {
-                let anim_config = niri_config::Animation {
-                    off: false,
-                    kind: self.config.borrow().animations.cursor_enlarge.0.kind,
-                };
-                let anim = crate::animation::Animation::new(
-                    self.clock.clone(),
-                    current_scale,
-                    target_scale,
-                    0.0,
-                    anim_config,
-                );
-                self.pointer_scale_animation = Some(anim);
-                self.queue_redraw_all();
-            }
+            let anim_config = niri_config::Animation {
+                off: false,
+                kind: self.config.borrow().animations.cursor_enlarge.0.kind,
+            };
+            let anim = crate::animation::Animation::new(
+                self.clock.clone(),
+                current_scale,
+                target_scale,
+                0.0,
+                anim_config,
+            );
+            self.pointer_scale_animation = Some(anim);
+            self.queue_redraw_all();
         }
     }
 
@@ -5129,9 +5129,7 @@ impl Niri {
             }
         }
 
-        let Some((output, pos_within_output)) = self.output_under(location) else {
-            return None;
-        };
+        let (output, pos_within_output) = self.output_under(location)?;
         let output = output.clone();
         let output_scale = Scale::from(output.current_scale().fractional_scale());
         let center = pos_within_output.to_physical_precise_round(output_scale);
@@ -5148,7 +5146,7 @@ impl Niri {
         let center = self.clamp_magnifier_center_to_output(output, center);
         *self.magnifier_center.borrow_mut() = Some((output.downgrade(), center));
         self.magnifier_center_anim = None;
-        self.queue_redraw(&output);
+        self.queue_redraw(output);
         true
     }
 
@@ -5486,68 +5484,7 @@ impl Niri {
             );
         }
 
-        // 光标特效：在光标之上绘制粒子（爆裂圆盘 / 溶解环 / 三角碎片 / 拖尾）。
-        // 环境过滤：全屏窗口下隐藏、纯桌面（无窗口）下可按配置隐藏。
-        let (hide_in_fullscreen, show_on_desktop) = {
-            let ce = &self.config.borrow().cursor_effect;
-            (ce.hide_in_fullscreen, ce.show_on_desktop)
-        };
-        let global_pos = self
-            .tablet_cursor_location
-            .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
-        let focused_mapped = self.window_under(global_pos);
-        let mut should_render = self.cursor_effect.enabled;
-        if should_render {
-            if hide_in_fullscreen {
-                if let Some(mapped) = focused_mapped {
-                    if mapped.sizing_mode().is_fullscreen() {
-                        should_render = false;
-                    }
-                } else if !show_on_desktop {
-                    should_render = false;
-                }
-            } else if focused_mapped.is_none() && !show_on_desktop {
-                should_render = false;
-            }
-        }
-        // 特效坐标是「输出本地物理像素」，只有指针所在的那块屏才画，
-        // 否则多显示器下每块屏都会画出同一份特效。
-        if should_render {
-            let output_geometry = self.global_space.output_geometry(output).unwrap();
-            match crate::cursor_effect::output_local_pointer(self, global_pos) {
-                Some((_, viewport)) if output_geometry.to_f64().contains(global_pos) => {
-                    // 顺手同步视口，保证模拟与渲染用的是同一份尺寸。
-                    self.cursor_effect.set_viewport(viewport);
-                }
-                _ => {
-                    tracing::debug!(
-                        "cursor-effect: no output-local pointer or geometry mismatch (pos={:?})",
-                        global_pos
-                    );
-                    should_render = false;
-                }
-            }
-        }
-        if should_render {
-            let elems = crate::cursor_effect::render::collect_render_elements(
-                renderer,
-                &self.cursor_effect,
-                Instant::now(),
-                output_scale.x as f32,
-            );
-            tracing::debug!("cursor-effect: pushed {} elements", elems.len());
-            // 注意方向：`push` 的约定是「先推的在上层」（渲染前统一 `.rev()`，
-            // 见 `render_to_vec` 与 `render_inner` 里 pointer 的注释），所以
-            // `collect_render_elements` 返回的是**从前到后**的顺序，直接按序推
-            // 就对了。曾经它返回绘制顺序、这里又原样推，整条特效在实机上被上下
-            // 颠倒（碎片压到最底、拖尾辉光盖在最上），而离线渲染器按返回顺序画
-            // 看不出问题——同一份代码两种结果就是这么来的。
-            for elem in elems {
-                push(elem.into());
-            }
-        } else {
-            tracing::debug!("cursor-effect: skipped by visibility filter");
-        }
+        // 光标特效已经移到 `render_inner` 的内容层（见 `push_cursor_effect`）。
     }
 
     /// Checks if the pointer should be included on a window cast or screenshot.
@@ -6083,6 +6020,76 @@ impl Niri {
         }
     }
 
+    /// 把一个输出上的光标特效推进内容层。
+    ///
+    /// 这段逻辑原先内联在 `render_pointer` 里，于是继承了「指针渲染」的全部门控：
+    /// 指针不可见就没特效、截图把整片特效算进指针层、锁屏上能看到粒子（N22）。
+    /// 搬到内容层之后，指针可见性只决定光标本身；环境过滤（全屏 / 桌面 / 锁屏）
+    /// 与多屏门禁仍在这里显式判断。
+    ///
+    /// 返回 `false` 表示本输出这一帧不画（并已把 `visible` 置为 false，供
+    /// `has_work()` 停止空转）。
+    fn push_cursor_effect<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        output: &Output,
+        push: &mut dyn FnMut(OutputRenderElements<R>),
+    ) {
+        let (hide_in_fullscreen, show_on_desktop) = {
+            let ce = &self.config.borrow().cursor_effect;
+            (ce.hide_in_fullscreen, ce.show_on_desktop)
+        };
+        let global_pos = self
+            .tablet_cursor_location
+            .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
+        let under_window = self.window_under(global_pos).is_some();
+        let under_fullscreen = self
+            .window_under(global_pos)
+            .is_some_and(|mapped| mapped.sizing_mode().is_fullscreen());
+
+        // P6：每块输出画自己的模拟实例，不再以「指针是否在这块屏上」为门禁。
+        // 上游每个显示器会话独立推进；只有这样，屏幕交界处的爆裂才能连续。
+        let key = output.name();
+        let Some((_pos, viewport)) =
+            crate::cursor_effect::output_pointer_for(self, output, global_pos)
+        else {
+            self.cursor_effect.set_visible_for(&key, false);
+            return;
+        };
+
+        let should_render = crate::cursor_effect::effect_should_render(
+            self.cursor_effect.enabled,
+            hide_in_fullscreen,
+            show_on_desktop,
+            under_fullscreen,
+            under_window,
+            self.is_locked(),
+            true,
+        );
+        self.cursor_effect.set_visible_for(&key, should_render);
+        if !should_render {
+            tracing::debug!("cursor-effect: skipped by visibility filter");
+            return;
+        }
+
+        self.cursor_effect.set_viewport_for(&key, viewport);
+        let scale = output.current_scale().fractional_scale() as f32;
+        let elems = crate::cursor_effect::render::collect_render_elements_for(
+            renderer,
+            &self.cursor_effect,
+            &key,
+            viewport,
+            Instant::now(),
+            scale,
+        );
+        tracing::debug!("cursor-effect: pushed {} elements on {key}", elems.len());
+        // `collect_render_elements` 返回的是**从前到后**（栈顶在前），niri 的
+        // `push` 约定是「先推的在上层」，直接按序推即可。
+        for elem in elems {
+            push(OutputRenderElements::CursorEffect(elem));
+        }
+    }
+
     pub fn render<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
@@ -6121,12 +6128,9 @@ impl Niri {
             let scale_cursor = self.config.borrow().magnifier.scale_cursor;
             let mut magnifier_push = |elem| {
                 if !scale_cursor {
-                    match &elem {
-                        OutputRenderElements::Pointer(_) => {
-                            push(elem);
-                            return;
-                        }
-                        _ => {}
+                    if let OutputRenderElements::Pointer(_) = &elem {
+                        push(elem);
+                        return;
                     }
                 }
                 let rescaled = RescaleRenderElement::from_element(Box::new(elem), pivot, zoom);
@@ -6169,6 +6173,15 @@ impl Niri {
         // The pointer goes on the top.
         if include_pointer && self.pointer_visibility.is_visible() {
             self.render_pointer(ctx.renderer, output, &mut |elem| push(elem.into()));
+        }
+
+        // 光标特效：独立覆盖层，不再寄生在 `render_pointer`（N22）。
+        // 指针隐藏（闲置 3 秒 / 打字）不影响特效；截图 UI 的“指针”层只有光标；
+        // 锁屏时不会把粒子压在锁屏 surface 之上。
+        if self.is_locked() {
+            self.cursor_effect.set_visible(false);
+        } else {
+            self.push_cursor_effect(ctx.renderer, output, push);
         }
 
         // Next, the screen transition texture.
@@ -6674,7 +6687,7 @@ impl Niri {
 
             // 光标特效：只要还有存活粒子就继续重绘，鼠标静止时
             // 爆裂 / 火花 / 拖尾也需要逐帧推进。
-            state.unfinished_animations_remain |= self.cursor_effect.has_work();
+            state.unfinished_animations_remain |= self.cursor_effect.has_work_any();
 
             // Also check layer surfaces.
             if !state.unfinished_animations_remain {
@@ -9426,6 +9439,7 @@ niri_render_elements! {
 niri_render_elements! {
     OutputRenderElements<R> => {
         Monitor = MonitorRenderElement<R>,
+        CursorEffect = crate::cursor_effect::render::CursorEffectElement,
         RescaledTile = RescaleRenderElement<TileRenderElement<R>>,
         LayerSurface = LayerSurfaceRenderElement<R>,
         RelocatedLayerSurface = CropRenderElement<RelocateRenderElement<RescaleRenderElement<

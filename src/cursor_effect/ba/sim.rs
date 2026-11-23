@@ -66,8 +66,17 @@ pub struct Viewport {
 }
 
 impl Viewport {
+    /// 视口尺寸必须非零。
+    ///
+    /// `Viewport` 是 `#[derive(Default)]`，默认 0×0；而渲染路径要到第一次成功
+    /// 绘制才会 `set_viewport`，`advance` 却先跑。启动瞬间点击就会拿 0×0 的
+    /// 视口做换算，`aspect = width / height` 变成 0/0 = NaN 灌进顶点数据（N24）。
+    /// 这里直接拒绝零尺寸，`screen_to_world` / `world_to_screen` 另有守卫。
     pub const fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
+        Self {
+            width: if width == 0 { 1 } else { width },
+            height: if height == 0 { 1 } else { height },
+        }
     }
 }
 
@@ -750,12 +759,10 @@ impl Simulation {
                 // 一档，读起来是「发白的蓝球」而不是参考里那个饱和的蔚蓝。
                 // 2.6 让 R / G 各自回落约 20%，蓝通道仍然饱和。
                 //
-                // 2.6 仍比参考帧 `17-27-14` 的盘心 (108,162,255) 高 6~8/255。
-                // 这一档不是「盘自己太亮」，而是盘内所有加法雾之外多出来的常数
-                // 偏移（洞内雾在盘心已经衰减到 0.3/255 以下，碎片雾也只有
-                // +2/255），所以只能落在盘本身上。2.4 让盘心回到 109 左右，
-                // 蓝通道依旧饱和。
-                intensity: 2.4,
+                // P2 删除了旧版解析补偿后，2.4 会把盘心抬到 (112,174,255)，
+                // 比参考帧 `17-27-14` 的 (108,163,255) 高 11/255。2.15 让盘心
+                // 回到 (106,166,255)，三通道差都 ≤3/255；蓝通道依旧饱和。
+                intensity: 2.15,
                 dissolve_threshold: 0.0,
                 atlas_frame: 0,
                 render_queue: 4499,
@@ -983,6 +990,9 @@ impl Simulation {
     }
 
     fn world_to_pixels(viewport: Viewport) -> f32 {
+        if viewport.width == 0 || viewport.height == 0 {
+            return 0.0;
+        }
         viewport.height as f32 * 0.5 * EFFECT_SCALE
     }
 
@@ -1314,6 +1324,21 @@ pub fn apply_global_scale(snapshot: &mut Snapshot, scale: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// N24：零尺寸视口不能产出 NaN 几何。
+    #[test]
+    fn zero_viewport_does_not_produce_nan() {
+        let viewport = Viewport::new(0, 0);
+        assert!(viewport.width > 0 && viewport.height > 0);
+        let world = Simulation::screen_to_world(Point::new(10.0, 10.0), viewport);
+        assert!(world.x.is_finite() && world.y.is_finite(), "got {world:?}");
+        let screen = Simulation::world_to_screen(world, viewport);
+        assert!(
+            screen.x.is_finite() && screen.y.is_finite(),
+            "got {screen:?}"
+        );
+        assert!(Simulation::world_to_pixels(viewport).is_finite());
+    }
 
     #[test]
     fn click_burst_spawns_disk_rings_and_shards() {

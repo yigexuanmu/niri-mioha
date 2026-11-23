@@ -23,16 +23,20 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use niri::cursor_effect::ba::{Point as FxPoint, Viewport};
+use niri::cursor_effect::effect_target::EffectTarget;
 use niri::cursor_effect::render::{collect_render_elements, CursorEffectElement, Material};
-use niri::cursor_effect::state::{CursorEffectSettings, CursorEffectState};
 use niri::cursor_effect::settings_from_config;
+use niri::cursor_effect::state::{CursorEffectSettings, CursorEffectState};
 use niri::render_helpers::{resources, shaders};
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::egl::native::EGLSurfacelessDisplay;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::element::{Element, RenderElement};
 use smithay::backend::renderer::gles::{ffi, GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{Bind, Color32F, Frame, FrameContext, Offscreen, Renderer};
-use smithay::utils::{Buffer as BufferCoord, Physical, Rectangle, Scale, Size, Transform};
+use smithay::backend::renderer::{
+    Bind, Color32F, Frame, FrameContext, ImportMem, Offscreen, Renderer,
+};
+use smithay::utils::{Buffer as BufferCoord, Physical, Point, Rectangle, Scale, Size, Transform};
 
 /// 设计基准分辨率：下面所有场景坐标都是按 1920×1080 写的。
 const W: i32 = 1920;
@@ -389,10 +393,7 @@ fn render_frame(
             .render(&mut fb, Size::from((w, h)), Transform::Normal)
             .context("render")?;
         frame
-            .clear(
-                Color32F::from([bg[0], bg[1], bg[2], 1.0]),
-                &damage,
-            )
+            .clear(Color32F::from([bg[0], bg[1], bg[2], 1.0]), &damage)
             .context("clear")?;
 
         // 反向迭代：`collect_render_elements` 按 niri 的约定返回**从前到后**
@@ -422,12 +423,21 @@ fn render_frame(
                 renderer.with_context(|gl| unsafe {
                     gl.GetIntegerv(ffi::BLEND_EQUATION_RGB, eq.as_mut_ptr());
                 })?;
-                println!("  eq=0x{:x} (MAX=0x8008, ADD=0x8006) for {:?}", eq[0], elem.material());
+                println!(
+                    "  eq=0x{:x} (MAX=0x8008, ADD=0x8006) for {:?}",
+                    eq[0],
+                    elem.material()
+                );
             }
             RenderElement::<GlesRenderer>::draw(elem, &mut frame, src, dst, &damage, &[], None)
                 .context("draw")?;
         }
 
+        // L5 帧时：`CE_NOSAVE=1` 跳过 ReadPixels + PPM 写盘，只量渲染本身。
+        if std::env::var_os("CE_NOSAVE").is_some() {
+            let _ = frame.finish().context("finish")?;
+            return Ok(());
+        }
         {
             let mut guard = frame.renderer();
             let renderer = guard.as_mut();
@@ -443,7 +453,7 @@ fn render_frame(
                 );
             })?;
         }
-        frame.finish().context("finish")?;
+        let _ = frame.finish().context("finish")?;
     }
 
     // 不再翻转 Y：smithay 的 GL 帧已经是 y 向下的投影（与元素坐标同向），
@@ -606,11 +616,20 @@ fn run_scene(
                     Material::Triangle,
                     Material::Trail,
                 ] {
-                    if counts[m as usize] == 0 {
+                    // P1 之后整帧是一个合成元素，不能靠元素层过滤。重新用
+                    // `CE_ONLY` 收集一次，走与主图完全相同的离屏管线。
+                    let previous = std::env::var("CE_ONLY").ok();
+                    std::env::set_var("CE_ONLY", material_tag(m));
+                    let iso_elems = collect_render_elements(renderer, &state, now_at(ts), 1.0);
+                    match previous {
+                        Some(value) => std::env::set_var("CE_ONLY", value),
+                        None => std::env::remove_var("CE_ONLY"),
+                    }
+                    if iso_elems.is_empty() {
                         continue;
                     }
                     let p = dir.join(format!("{ts:.3}.{}.ppm", material_tag(m)));
-                    render_frame(renderer, &elems, Some(m), bg, &p)?;
+                    render_frame(renderer, &iso_elems, None, bg, &p)?;
                 }
             }
         }
@@ -650,6 +669,38 @@ fn parse_bg(s: &str) -> [f32; 3] {
     }
 }
 
+/// P1 单次 resolve 探针：FP16 内容 → 一次 transport → 读回，与 CPU 期望比较。
+fn run_resolve_probe(renderer: &mut GlesRenderer) -> anyhow::Result<()> {
+    let size = 64i32;
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for _ in 0..(size * size) {
+        pixels.extend_from_slice(&[128, 128, 128, 255]);
+    }
+    let texture = renderer
+        .import_memory(&pixels, Fourcc::Abgr8888, Size::from((size, size)), false)
+        .context("import probe texture")?;
+    let geo: Rectangle<i32, Physical> =
+        Rectangle::new(Point::from((0i32, 0i32)), Size::from((size, size)));
+    let elem = CursorEffectElement::from_composite(texture, renderer.context_id(), geo, None);
+    let mut target = EffectTarget::default();
+    target
+        .composite(renderer, 1.0, geo, Size::from((size, size)), &[elem], None)
+        .context("probe composite")?;
+    let got = target.probe_center(renderer).context("probe read")?;
+    let linear = 128.0f64 / 255.0;
+    let encoded = if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    let expected = encoded * 255.0;
+    eprintln!(
+        "PROBE got={got:?} expected={expected:.2} channel_diff={:.3}/255",
+        (got[0] as f64 - expected).abs()
+    );
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let which = args.get(1).cloned().unwrap_or_else(|| "s1".into());
@@ -662,8 +713,8 @@ fn main() -> anyhow::Result<()> {
     let bg = parse_bg(args.get(4).map(String::as_str).unwrap_or("dark"));
     let settings = match args.get(5) {
         Some(path) => {
-            let text = fs::read_to_string(path)
-                .with_context(|| format!("read config fragment {path}"))?;
+            let text =
+                fs::read_to_string(path).with_context(|| format!("read config fragment {path}"))?;
             let config = niri_config::Config::parse_mem(&text)
                 .with_context(|| format!("parse config fragment {path}"))?;
             Some(settings_from_config(&config.cursor_effect))
@@ -678,6 +729,10 @@ fn main() -> anyhow::Result<()> {
     };
     resources::init(&mut renderer);
     shaders::init(&mut renderer);
+    if std::env::var_os("CE_RESOLVE_PROBE").is_some() {
+        run_resolve_probe(&mut renderer)?;
+        return Ok(());
+    }
 
     let all = scenes();
     let picked: Vec<&Scene> = if which == "all" {
@@ -690,8 +745,31 @@ fn main() -> anyhow::Result<()> {
         vec![s]
     };
 
-    for scene in picked {
-        run_scene(&mut renderer, scene, &outdir, iso, bg, settings)?;
+    let repeat: usize = std::env::var("CE_REPEAT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let timing = std::env::var_os("CE_TIMING").is_some();
+    for rep in 0..repeat {
+        let started = Instant::now();
+        for scene in &picked {
+            run_scene(&mut renderer, scene, &outdir, iso, bg, settings)?;
+        }
+        if timing {
+            let rss = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|text| {
+                    text.lines()
+                        .find(|line| line.starts_with("VmRSS:"))
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "L5 rep={rep} elapsed_ms={} {}",
+                started.elapsed().as_millis(),
+                rss.trim()
+            );
+        }
     }
     Ok(())
 }

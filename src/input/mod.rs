@@ -699,17 +699,19 @@ impl State {
                 // Return is the hardcoded grid-activation key only when pressed without
                 // modifiers. With modifiers held (e.g. Mod+Return bound to a user action), the
                 // configured binding below must take precedence.
-                if pressed && modifiers.is_empty() && raw == Some(Keysym::Return) {
-                    if grid_should_confirm_on_return(
+                if pressed
+                    && modifiers.is_empty()
+                    && raw == Some(Keysym::Return)
+                    && grid_should_confirm_on_return(
                         is_grid_overview_open,
                         &this.niri.keyboard_focus,
                         this.niri.layout.grid_focused_window_id().is_some(),
-                    ) {
-                        this.niri.layout.confirm_grid_selection();
-                        this.niri.suppressed_keys.insert(key_code);
-                        this.niri.queue_redraw_all();
-                        return FilterResult::Intercept(None);
-                    }
+                    )
+                {
+                    this.niri.layout.confirm_grid_selection();
+                    this.niri.suppressed_keys.insert(key_code);
+                    this.niri.queue_redraw_all();
+                    return FilterResult::Intercept(None);
                 }
 
                 if let Some(Keysym::space) = raw {
@@ -3050,16 +3052,8 @@ impl State {
         // 光标特效：把指针移动喂给拖尾（内部按 ≥5.4px 的步长抽点）。
         // 每个 motion 事件都喂，不做时间节流：渲染由 vblank 驱动，节流反而会让
         // 快速移动时的拖尾变成断续直线。
-        {
-            let now = Instant::now();
-            if let Some((pos, viewport)) =
-                crate::cursor_effect::output_local_pointer(&self.niri, new_pos)
-            {
-                let ce = &mut self.niri.cursor_effect;
-                ce.set_viewport(viewport);
-                ce.on_move(pos, now);
-            }
-        }
+        self.niri
+            .cursor_effect_pointer_move(new_pos, Instant::now());
 
         // Redraw to update the cursor position.
         // FIXME: redraw only outputs overlapping the cursor.
@@ -3178,16 +3172,7 @@ impl State {
         self.a11y_notify_pointer_motion();
 
         // 光标特效：把指针移动喂给拖尾（内部按 ≥5.4px 的步长抽点）。
-        {
-            let now = Instant::now();
-            if let Some((fx, viewport)) =
-                crate::cursor_effect::output_local_pointer(&self.niri, pos)
-            {
-                let ce = &mut self.niri.cursor_effect;
-                ce.set_viewport(viewport);
-                ce.on_move(fx, now);
-            }
-        }
+        self.niri.cursor_effect_pointer_move(pos, Instant::now());
 
         // Redraw to update the cursor position.
         // FIXME: redraw only outputs overlapping the cursor.
@@ -3648,10 +3633,8 @@ impl State {
             }
         }
 
-        // 光标特效：按键按下触发点击爆裂（同时开始拖尾），抬起结束拖尾。
+        // 光标特效：按下触发爆裂、抬起结束拖尾；P6 广播到所有输出。
         {
-            // 按到特效的键先翻成 `TriggerButton`，具体认哪些键由配置
-            // `trigger-buttons` 决定（`cursor-effect` 自己的状态里判断）。
             let trigger_button = button.and_then(|button| {
                 Some(match button {
                     MouseButton::Left => crate::cursor_effect::TriggerButton::Left,
@@ -3664,28 +3647,13 @@ impl State {
             });
             let now = Instant::now();
             let loc = pointer.current_location();
-            let target = crate::cursor_effect::output_local_pointer(&self.niri, loc);
-            let ce = &mut self.niri.cursor_effect;
-            if let Some((pos, viewport)) = target {
-                tracing::debug!(
-                    "cursor-effect: button {:?} -> {:?}/{:?} at {:?} viewport={:?}",
-                    button,
-                    trigger_button,
-                    button_state,
-                    pos,
-                    viewport,
-                );
-                ce.set_viewport(viewport);
-                if ButtonState::Pressed == button_state {
-                    if let Some(pressed) = trigger_button {
-                        ce.on_button_press(pos, now, pressed);
-                    }
+            if ButtonState::Pressed == button_state {
+                if let Some(pressed) = trigger_button {
+                    self.niri.cursor_effect_pointer_down(loc, now, pressed);
                 }
-            } else {
-                tracing::debug!("cursor-effect: button on no output (pos={:?})", loc);
             }
             if ButtonState::Released == button_state {
-                ce.on_button_release(now);
+                self.niri.cursor_effect_pointer_up(now);
             }
         }
 
@@ -3877,34 +3845,10 @@ impl State {
                 let vertical = vertical_amount_v120.unwrap_or(0.);
                 let ticks = self.niri.vertical_wheel_tracker.accumulate(vertical);
                 if ticks != 0 {
-                    let (bind_up, bind_down) = if should_handle_in_overview && modifiers.is_empty()
+                    let (bind_up, bind_down) = if (should_handle_in_overview
+                        && modifiers.is_empty())
+                        || should_handle_grid_workspace_scroll
                     {
-                        let bind_up = Some(Bind {
-                            key: Key {
-                                trigger: Trigger::WheelScrollUp,
-                                modifiers: Modifiers::empty(),
-                            },
-                            action: Action::FocusWorkspaceUpUnderMouse,
-                            repeat: true,
-                            cooldown: Some(Duration::from_millis(50)),
-                            allow_when_locked: false,
-                            allow_inhibiting: false,
-                            hotkey_overlay_title: None,
-                        });
-                        let bind_down = Some(Bind {
-                            key: Key {
-                                trigger: Trigger::WheelScrollDown,
-                                modifiers: Modifiers::empty(),
-                            },
-                            action: Action::FocusWorkspaceDownUnderMouse,
-                            repeat: true,
-                            cooldown: Some(Duration::from_millis(50)),
-                            allow_when_locked: false,
-                            allow_inhibiting: false,
-                            hotkey_overlay_title: None,
-                        });
-                        (bind_up, bind_down)
-                    } else if should_handle_grid_workspace_scroll {
                         let bind_up = Some(Bind {
                             key: Key {
                                 trigger: Trigger::WheelScrollUp,
@@ -5053,14 +4997,11 @@ impl State {
         // 触摸屏没有悬停光标，不走这条路径的话按下去什么都不会发生 —— 上游
         // 的 `IsTouchscreenMode` 就是为这种设备准备的开关。
         if self.niri.cursor_effect.touch_mode() {
-            let now = Instant::now();
-            if let Some((fx, viewport)) =
-                crate::cursor_effect::output_local_pointer(&self.niri, pos)
-            {
-                let ce = &mut self.niri.cursor_effect;
-                ce.set_viewport(viewport);
-                ce.on_button_press(fx, now, crate::cursor_effect::TriggerButton::Left);
-            }
+            self.niri.cursor_effect_pointer_down(
+                pos,
+                Instant::now(),
+                crate::cursor_effect::TriggerButton::Left,
+            );
         }
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -5192,7 +5133,8 @@ impl State {
         };
         let slot = evt.slot();
 
-        if let Some(capture) = self.niri.screenshot_ui.pointer_up(Some(slot)) {            if capture {
+        if let Some(capture) = self.niri.screenshot_ui.pointer_up(Some(slot)) {
+            if capture {
                 self.confirm_screenshot(true);
             } else {
                 self.niri.queue_redraw_all();
@@ -5204,8 +5146,7 @@ impl State {
         // 光标特效：`touch-mode` 打开时，手指抬起结束拖尾（不再触发爆裂，
         // 爆裂只跟「按下」走）。
         if self.niri.cursor_effect.touch_mode() {
-            let now = Instant::now();
-            self.niri.cursor_effect.on_button_release(now);
+            self.niri.cursor_effect_pointer_up(Instant::now());
         }
 
         handle.up(
@@ -5261,14 +5202,7 @@ impl State {
         // 光标特效：`touch-mode` 打开时，手指的连续移动喂给拖尾（内部有输入
         // 采样门，采样率配置与鼠标共用同一份）。
         if self.niri.cursor_effect.touch_mode() {
-            let now = Instant::now();
-            if let Some((fx, viewport)) =
-                crate::cursor_effect::output_local_pointer(&self.niri, pos)
-            {
-                let ce = &mut self.niri.cursor_effect;
-                ce.set_viewport(viewport);
-                ce.on_move(fx, now);
-            }
+            self.niri.cursor_effect_pointer_move(pos, Instant::now());
         }
     }
     fn on_touch_frame<I: InputBackend>(&mut self, _evt: I::TouchFrameEvent) {
@@ -5278,6 +5212,9 @@ impl State {
         handle.frame(self);
     }
     fn on_touch_cancel<I: InputBackend>(&mut self, _evt: I::TouchCancelEvent) {
+        // N11：触摸取消必须收尾拖尾，否则会留一段悬空笔画到生命周期到期。
+        self.niri
+            .cursor_effect_pointer_cancel(std::time::Instant::now());
         let Some(handle) = self.niri.seat.get_touch() else {
             return;
         };
